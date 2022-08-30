@@ -1553,6 +1553,8 @@ def do_generate(
 
     raise Exception('Invalid mode selected')
 
+# TODO: move all of the CSS to a separate file (webui.css)
+# TODO: let the user supply a CSS file (userstyle.css)
 
 css_hide_progressbar = \
     """
@@ -1647,6 +1649,31 @@ custom_css = \
         flex: none;
         margin-left: auto;
     }
+
+    /* increase inpainting size */
+    #sd_inpaint {
+        aspect-ratio: 1;
+        width: 100%;
+        height: 100%;
+    }
+
+    #sd_inpaint > div[data-testid="image"] {
+        max-width: 100%;
+        max-height: 100%;
+        height: 100%;
+        width: 100%;
+        top: 0;
+        left: 0;
+        position: absolute;
+    }
+
+    /* pretty sure we don't want this, does weird things to the canvas
+       the canvas/masking feature seems buggy even normally, require two reloads of the image to work correctly
+    #sd_inpaint > div[data-testid="image"] > div > canvas {
+        height: 100% !important;
+        width: 100% !important;
+    }
+    */
     """
 
 full_css = main_css + css_hide_progressbar + custom_css
@@ -1669,19 +1696,22 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                         sd_batch_size = gr.Number(label='Images per batch', precision=0, value=1)
 
                     with gr.Group():
+                        # TODO: hide label when image is loaded?
+                        # TODO: use the same input image element but change the style from crop to sketch dynamically on mode change?
+                        sd_inpainting_image = gr.Image(label='Input Image', show_label=False, source="upload", interactive=True, type="pil", tool="sketch", visible=False, elem_id='sd_inpaint')
                         sd_input_image = gr.Image(label='Input Image', source="upload", interactive=True, type="pil", show_label=True, visible=False)
                         sd_resize_mode = gr.Dropdown(label="Resize mode", choices=["Stretch", "Scale and crop", "Scale and fill"], type="index", value="Stretch", visible=False)
 
                         sd_inpainting_mask_blur = gr.Slider(label='Mask blur', minimum=0, maximum=64, step=1, value=4, visible=False)
                         sd_inpainting_mask_content = gr.Radio(label='Masked content', choices=['Fill', 'Original', 'Latent noise', 'Latent nothing'], value='Fill', type="index", visible=False)
 
+                    # TODO: move this under the main buttons somewhere (either inside/outside TabUI)
                     with gr.Group():
                         sd_custom_code = gr.Textbox(label="Python script", visible=cmd_opts.allow_code, lines=1)
 
                 # Center Column
                 with gr.Column():
                     sd_output_image = gr.Gallery(show_label=False, elem_id='output_gallery').style(grid=3)
-                    sd_inpainting_image = gr.Image(label='Inpainting image', source="upload", interactive=True, type="pil", tool="sketch", visible=False)
                     sd_output_html = gr.HTML()
 
                 # Right Column
