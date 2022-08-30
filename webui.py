@@ -939,7 +939,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         imgs = []
 
         if not self.init_images or None in self.init_images:
-            raise Exception('No input image provided for Image-to-Image')
+            raise Exception('No input image provided')
 
         for img in self.init_images:
             image = img.convert("RGB")
@@ -1103,7 +1103,7 @@ def run_extras(image, GFPGAN_strength, RealESRGAN_upscaling, RealESRGAN_model_in
     torch_gc()
 
     if not image:
-        raise Exception('No input image provided for Post-Processing')
+        raise Exception('No input image provided')
 
     image = image.convert("RGB")
 
@@ -1194,6 +1194,17 @@ def do_generate(
     loopback: bool,
     upscale: bool):
     
+    if mode == 'Text-to-Image' or mode == 'Image-to-Image':
+        # validate some settings to generate useful error messages
+        if image_height % 64 != 0:
+            raise Exception("Image height must be a multiple of 64")
+        elif image_width % 64 != 0:
+            raise Exception("Image width must be a multiple of 64")
+        elif batch_count <= 0:
+            raise Exception("Batch count must be > 0")
+        elif batch_size <= 0:
+            raise Exception("Images per batch must be > 0")
+
     if mode == 'Text-to-Image':
         return txt2img(
             prompt=prompt,
@@ -1287,6 +1298,7 @@ custom_css = \
     padding-left: 0 !important;
     padding-right: 0 !important;
     border-style: none !important;
+
 }
 
 #sd_mode > label > select {
@@ -1302,6 +1314,8 @@ custom_css = \
     background-size: contain;
     padding-right: 0;
     border-color: rgb(75 85 99 / var(--tw-border-opacity));
+    width: 15rem;
+    float: right;
 }
 
 /* custom column scaling (odd = right/left, even = center) */
@@ -1327,6 +1341,19 @@ input[type="number"]::-webkit-inner-spin-button {
 input[type="number"] {
     -moz-appearance: textfield;
 }
+
+/* generate button size */
+#sd_generate {
+    width: 15rem;
+    flex: none;
+}
+
+/* save button */
+#sd_save_settings {
+    width: 15rem;
+    flex: none;
+    margin-left: auto;
+}
 """
 
 full_css = main_css + css_hide_progressbar + custom_css
@@ -1340,9 +1367,6 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             with gr.Row(elem_id='body').style(equal_height=False):
                 # Left Column
                 with gr.Column():
-                    sd_mode = \
-                        gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Post-Processing'], elem_id='sd_mode')
-
                     with gr.Row():
                         sd_image_height = \
                             gr.Number(label="Image height", value=512, precision=0, elem_id='img_height')
@@ -1370,9 +1394,6 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
 
                 # Right Column
                 with gr.Column():
-                    sd_generate = \
-                        gr.Button('Generate', variant='primary').style(full_width=True)
-
                     with gr.Row():
                         sd_sampling_method = \
                             gr.Dropdown(label='Sampling method', choices=[x.name for x in samplers], value=samplers[0].name, type="index")
@@ -1404,13 +1425,20 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                     sd_upscale = \
                         gr.Checkbox(label='Super resolution upscale', value=False, visible=False)
 
+            with gr.Row():
+                sd_mode = \
+                    gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Post-Processing'], elem_id='sd_mode')
+                sd_generate = \
+                    gr.Button('Generate', variant='primary', elem_id='sd_generate').style(full_width=False)
+
         with gr.TabItem('Settings', id='settings_tab'):
             # TODO: Add HTML output to indicate settings saved
             sd_settings = [create_setting_component(key) for key in opts.data_labels.keys()]
-            sd_save_settings = \
-                gr.Button('Save')
-            sd_confirm_settings = \
-                gr.HTML()
+            with gr.Row():
+                sd_confirm_settings = \
+                    gr.HTML(elem_id='sd_settings_html')
+                sd_save_settings = \
+                    gr.Button('Save', variant='primary', elem_id='sd_save_settings').style(full_width=False)
 
     def mode_change(mode: str, facefix: bool, custom_seed: bool):
         is_img2img = (mode == 'Image-to-Image')
