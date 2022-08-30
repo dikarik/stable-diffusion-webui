@@ -2,12 +2,14 @@ import argparse
 import os
 import sys
 from collections import namedtuple
+from contextlib import nullcontext
+
 import torch
 import torch.nn as nn
 import numpy as np
 import gradio as gr
 from omegaconf import OmegaConf
-from PIL import Image, ImageFont, ImageDraw, PngImagePlugin
+from PIL import Image, ImageFont, ImageDraw, PngImagePlugin, ImageFilter, ImageOps
 from torch import autocast
 import mimetypes
 import random
@@ -27,6 +29,7 @@ try:
     # this silences the annoying "Some weights of the model checkpoint were not used when initializing..." message at start.
 
     from transformers import logging
+
     logging.set_verbosity_error()
 except Exception:
     pass
@@ -44,15 +47,29 @@ invalid_filename_chars = '<>:"/\\|?*\n'
 config_filename = "config.json"
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--config", type=str, default="configs/stable-diffusion/v1-inference.yaml", help="path to config which constructs model",)
-parser.add_argument("--ckpt", type=str, default="models/ldm/stable-diffusion-v1/model.ckpt", help="path to checkpoint of model",)
+parser.add_argument("--config", type=str, default="configs/stable-diffusion/v1-inference.yaml", help="path to config which constructs model", )
+parser.add_argument("--ckpt", type=str, default="models/ldm/stable-diffusion-v1/model.ckpt", help="path to checkpoint of model", )
 parser.add_argument("--gfpgan-dir", type=str, help="GFPGAN directory", default=('./src/gfpgan' if os.path.exists('./src/gfpgan') else './GFPGAN'))
 parser.add_argument("--no-half", action='store_true', help="do not switch the model to 16-bit floats")
 parser.add_argument("--no-progressbar-hiding", action='store_true', help="do not hide progressbar in gradio UI (we hide it because it slows down ML if you have hardware accleration in browser)")
 parser.add_argument("--max-batch-count", type=int, default=16, help="maximum batch count value for the UI")
 parser.add_argument("--embeddings-dir", type=str, default='embeddings', help="embeddings dirtectory for textual inversion (default: embeddings)")
+parser.add_argument("--allow-code", action='store_true', help="allow custom script execution from webui")
+parser.add_argument("--lowvram", action='store_true', help="enamble stable diffusion model optimizations for low vram")
+parser.add_argument("--precision", type=str, help="evaluate at this precision", choices=["full", "autocast"], default="autocast")
 
 cmd_opts = parser.parse_args()
+
+cpu = torch.device("cpu")
+gpu = torch.device("cuda")
+device = gpu if torch.cuda.is_available() else cpu
+
+css_hide_progressbar = """
+.wrap .m-12 svg { display:none!important; }
+.wrap .m-12::before { content:"Loading..." }
+.progress-bar { display:none!important; }
+.meta-text { display:none!important; }
+"""
 
 SamplerData = namedtuple('SamplerData', ['name', 'constructor'])
 samplers = [
@@ -95,11 +112,37 @@ try:
     ]
     have_realesrgan = True
 except Exception:
-    print("Error loading Real-ESRGAN:", file=sys.stderr)
+    print("Error importing Real-ESRGAN:", file=sys.stderr)
     print(traceback.format_exc(), file=sys.stderr)
 
     realesrgan_models = [RealesrganModelInfo('None', '', 0, None)]
     have_realesrgan = False
+
+sd_upscalers = {
+    "RealESRGAN": lambda img: upscale_with_realesrgan(img, 2, 0),
+    "Lanczos": lambda img: img.resize((img.width * 2, img.height * 2), resample=LANCZOS),
+    "None": lambda img: img
+}
+
+have_gfpgan = False
+if os.path.exists(cmd_opts.gfpgan_dir):
+    try:
+        sys.path.append(os.path.abspath(cmd_opts.gfpgan_dir))
+        from gfpgan import GFPGANer
+
+        have_gfpgan = True
+    except:
+        print("Error importing GFPGAN:", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
+
+
+def gfpgan():
+    model_name = 'GFPGANv1.3'
+    model_path = os.path.join(cmd_opts.gfpgan_dir, 'experiments/pretrained_models', model_name + '.pth')
+    if not os.path.isfile(model_path):
+        raise Exception("GFPGAN model not found at path " + model_path)
+
+    return GFPGANer(model_path=model_path, upscale=1, arch='clean', channel_multiplier=2, bg_upsampler=None)
 
 
 class Options:
@@ -116,12 +159,17 @@ class Options:
         "samples_save": OptionInfo(True, "Save indiviual samples"),
         "samples_format": OptionInfo('png', 'File format for indiviual samples'),
         "grid_save": OptionInfo(True, "Save image grids"),
+        "return_grid": OptionInfo(True, "Show grid in results for web"),
         "grid_format": OptionInfo('png', 'File format for grids'),
         "grid_extended_filename": OptionInfo(False, "Add extended info (seed, prompt) to filename when saving grid"),
+        "grid_only_if_multiple": OptionInfo(True, "Do not save grids consisting of one picture"),
         "n_rows": OptionInfo(-1, "Grid row count; use -1 for autodetect and 0 for it to be same as batch size", gr.Slider, {"minimum": -1, "maximum": 16, "step": 1}),
         "jpeg_quality": OptionInfo(80, "Quality for saved jpeg images", gr.Slider, {"minimum": 1, "maximum": 100, "step": 1}),
+        "export_for_4chan": OptionInfo(True, "If PNG image is larger than 4MB or any dimension is larger than 4000, downscale and save copy as JPG"),
         "enable_pnginfo": OptionInfo(True, "Save text information about generation parameters as chunks to png files"),
+        "font": OptionInfo("arial.ttf", "Font for image grids  that have text"),
         "prompt_matrix_add_to_start": OptionInfo(True, "In prompt matrix, add the variable combination of text to the start of the prompt, rather than the end"),
+        "sd_upscale_upscaler_index": OptionInfo("RealESRGAN", "Upscaler to use for SD upscale", gr.Radio, {"choices": list(sd_upscalers.keys())}),
         "sd_upscale_overlap": OptionInfo(64, "Overlap for tiles for SD upscale. The smaller it is, the less smooth transition from one tile to another", gr.Slider, {"minimum": 0, "maximum": 256, "step": 16}),
     }
 
@@ -169,9 +217,74 @@ def load_model_from_config(config, ckpt, verbose=False):
         print("unexpected keys:")
         print(u)
 
-    model.cuda()
     model.eval()
     return model
+
+
+module_in_gpu = None
+
+
+def setup_for_low_vram(sd_model):
+    parents = {}
+
+    def send_me_to_gpu(module, _):
+        """send this module to GPU; send whatever tracked module was previous in GPU to CPU;
+        we add this as forward_pre_hook to a lot of modules and this way all but one of them will
+        be in CPU
+        """
+        global module_in_gpu
+
+        module = parents.get(module, module)
+
+        if module_in_gpu == module:
+            return
+
+        if module_in_gpu is not None:
+            module_in_gpu.to(cpu)
+
+        module.to(gpu)
+        module_in_gpu = module
+
+    # see below for register_forward_pre_hook;
+    # first_stage_model does not use forward(), it uses encode/decode, so register_forward_pre_hook is
+    # useless here, and we just replace those methods
+    def first_stage_model_encode_wrap(self, encoder, x):
+        send_me_to_gpu(self, None)
+        return encoder(x)
+
+    def first_stage_model_decode_wrap(self, decoder, z):
+        send_me_to_gpu(self, None)
+        return decoder(z)
+
+    # remove three big modules, cond, first_stage, and unet from the model and then
+    # send the model to GPU. Then put modules back. the modules will be in CPU.
+    stored = sd_model.cond_stage_model.transformer, sd_model.first_stage_model, sd_model.model
+    sd_model.cond_stage_model.transformer, sd_model.first_stage_model, sd_model.model = None, None, None
+    sd_model.to(device)
+    sd_model.cond_stage_model.transformer, sd_model.first_stage_model, sd_model.model = stored
+
+    # register hooks for those the first two models
+    sd_model.cond_stage_model.transformer.register_forward_pre_hook(send_me_to_gpu)
+    sd_model.first_stage_model.register_forward_pre_hook(send_me_to_gpu)
+    sd_model.first_stage_model.encode = lambda x, en=sd_model.first_stage_model.encode: first_stage_model_encode_wrap(sd_model.first_stage_model, en, x)
+    sd_model.first_stage_model.decode = lambda z, de=sd_model.first_stage_model.decode: first_stage_model_decode_wrap(sd_model.first_stage_model, de, z)
+    parents[sd_model.cond_stage_model.transformer] = sd_model.cond_stage_model
+
+    # the third remaining model is still too big for 4GB, so we also do the same for its submodules
+    # so that only one of them is in GPU at a time
+    diff_model = sd_model.model.diffusion_model
+    stored = diff_model.input_blocks, diff_model.middle_block, diff_model.output_blocks, diff_model.time_embed
+    diff_model.input_blocks, diff_model.middle_block, diff_model.output_blocks, diff_model.time_embed = None, None, None, None
+    sd_model.model.to(device)
+    diff_model.input_blocks, diff_model.middle_block, diff_model.output_blocks, diff_model.time_embed = stored
+
+    # install hooks for bits of third model
+    diff_model.time_embed.register_forward_pre_hook(send_me_to_gpu)
+    for block in diff_model.input_blocks:
+        block.register_forward_pre_hook(send_me_to_gpu)
+    diff_model.middle_block.register_forward_pre_hook(send_me_to_gpu)
+    for block in diff_model.output_blocks:
+        block.register_forward_pre_hook(send_me_to_gpu)
 
 
 def create_random_tensors(shape, seeds):
@@ -189,17 +302,16 @@ def create_random_tensors(shape, seeds):
 
 
 def torch_gc():
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
 
-def save_image(image, path, basename, seed, prompt, extension, info=None, short_filename=False):
-    prompt = sanitize_filename_part(prompt)
-
-    if short_filename:
-        filename = f"{basename}.{extension}"
+def save_image(image, path, basename, seed=None, prompt=None, extension='png', info=None, short_filename=False):
+    if short_filename or prompt is None or seed is None:
+        filename = f"{basename}"
     else:
-        filename = f"{basename}-{seed}-{prompt[:128]}.{extension}"
+        filename = f"{basename}-{seed}-{sanitize_filename_part(prompt)[:128]}"
 
     if extension == 'png' and opts.enable_pnginfo and info is not None:
         pnginfo = PngImagePlugin.PngInfo()
@@ -207,7 +319,21 @@ def save_image(image, path, basename, seed, prompt, extension, info=None, short_
     else:
         pnginfo = None
 
-    image.save(os.path.join(path, filename), quality=opts.jpeg_quality, pnginfo=pnginfo)
+    os.makedirs(path, exist_ok=True)
+    fullfn = os.path.join(path, f"{filename}.{extension}")
+    image.save(fullfn, quality=opts.jpeg_quality, pnginfo=pnginfo)
+
+    target_side_length = 4000
+    oversize = image.width > target_side_length or image.height > target_side_length
+    if opts.export_for_4chan and (oversize or os.stat(fullfn).st_size > 4 * 1024 * 1024):
+        ratio = image.width / image.height
+
+        if oversize and ratio > 1:
+            image = image.resize((target_side_length, image.height * target_side_length // image.width), LANCZOS)
+        elif oversize:
+            image = image.resize((image.width * target_side_length // image.height, target_side_length), LANCZOS)
+
+        image.save(os.path.join(path, f"{filename}.jpg"), quality=opts.jpeg_quality, pnginfo=pnginfo)
 
 
 def sanitize_filename_part(text):
@@ -222,28 +348,15 @@ def plaintext_to_html(text, klass=None):
     return text
 
 
-def load_gfpgan():
-    model_name = 'GFPGANv1.3'
-    model_path = os.path.join(cmd_opts.gfpgan_dir, 'experiments/pretrained_models', model_name + '.pth')
-    if not os.path.isfile(model_path):
-        raise Exception("GFPGAN model not found at path "+model_path)
-
-    sys.path.append(os.path.abspath(cmd_opts.gfpgan_dir))
-    from gfpgan import GFPGANer
-
-    return GFPGANer(model_path=model_path, upscale=1, arch='clean', channel_multiplier=2, bg_upsampler=None)
-
-
-def image_grid(imgs, batch_size, force_n_rows=None):
-    if force_n_rows is not None:
-        rows = force_n_rows
-    elif opts.n_rows > 0:
-        rows = opts.n_rows
-    elif opts.n_rows == 0:
-        rows = batch_size
-    else:
-        rows = math.sqrt(len(imgs))
-        rows = round(rows)
+def image_grid(imgs, batch_size=1, rows=None):
+    if rows is None:
+        if opts.n_rows > 0:
+            rows = opts.n_rows
+        elif opts.n_rows == 0:
+            rows = batch_size
+        else:
+            rows = math.sqrt(len(imgs))
+            rows = round(rows)
 
     cols = math.ceil(len(imgs) / rows)
 
@@ -281,7 +394,7 @@ def split_grid(image, tile_w=512, tile_h=512, overlap=64):
         for col in range(cols):
             x = col * now
 
-            if x+tile_w >= w:
+            if x + tile_w >= w:
                 x = w - tile_w
 
             tile = image.crop((x, y, x + tile_w, y + tile_h))
@@ -323,69 +436,114 @@ def combine_grid(grid):
     return combined_image
 
 
-def draw_prompt_matrix(im, width, height, all_prompts):
-    def wrap(text, font, line_length):
+class GridAnnotation:
+    def __init__(self, text='', is_active=True):
+        self.text = text
+        self.is_active = is_active
+        self.size = None
+
+
+def draw_grid_annotations(im, width, height, hor_texts, ver_texts):
+    def wrap(drawing, text, font, line_length):
         lines = ['']
         for word in text.split():
             line = f'{lines[-1]} {word}'.strip()
-            if d.textlength(line, font=font) <= line_length:
+            if drawing.textlength(line, font=font) <= line_length:
                 lines[-1] = line
             else:
                 lines.append(word)
-        return '\n'.join(lines)
+        return lines
 
-    def draw_texts(pos, draw_x, draw_y, texts, sizes):
-        for i, (text, size) in enumerate(zip(texts, sizes)):
-            active = pos & (1 << i) != 0
+    def draw_texts(drawing, draw_x, draw_y, lines):
+        for i, line in enumerate(lines):
+            drawing.multiline_text((draw_x, draw_y + line.size[1] / 2), line.text, font=fnt, fill=color_active if line.is_active else color_inactive, anchor="mm", align="center")
 
-            if not active:
-                text = '\u0336'.join(text) + '\u0336'
+            if not line.is_active:
+                drawing.line((draw_x - line.size[0] // 2, draw_y + line.size[1] // 2, draw_x + line.size[0] // 2, draw_y + line.size[1] // 2), fill=color_inactive, width=4)
 
-            d.multiline_text((draw_x, draw_y + size[1] / 2), text, font=fnt, fill=color_active if active else color_inactive, anchor="mm", align="center")
-
-            draw_y += size[1] + line_spacing
+            draw_y += line.size[1] + line_spacing
 
     fontsize = (width + height) // 25
     line_spacing = fontsize // 2
-    fnt = ImageFont.truetype("arial.ttf", fontsize)
+    fnt = ImageFont.truetype(opts.font, fontsize)
     color_active = (0, 0, 0)
     color_inactive = (153, 153, 153)
 
-    pad_top = height // 4
-    pad_left = width * 3 // 4 if len(all_prompts) > 2 else 0
+    pad_left = width * 3 // 4 if len(ver_texts) > 1 else 0
 
     cols = im.width // width
     rows = im.height // height
 
-    prompts = all_prompts[1:]
+    assert cols == len(hor_texts), f'bad number of horizontal texts: {len(hor_texts)}; must be {cols}'
+    assert rows == len(ver_texts), f'bad number of vertical texts: {len(ver_texts)}; must be {rows}'
+
+    calc_img = Image.new("RGB", (1, 1), "white")
+    calc_d = ImageDraw.Draw(calc_img)
+
+    for texts, allowed_width in zip(hor_texts + ver_texts, [width] * len(hor_texts) + [pad_left] * len(ver_texts)):
+        items = [] + texts
+        texts.clear()
+
+        for line in items:
+            wrapped = wrap(calc_d, line.text, fnt, allowed_width)
+            texts += [GridAnnotation(x, line.is_active) for x in wrapped]
+
+        for line in texts:
+            bbox = calc_d.multiline_textbbox((0, 0), line.text, font=fnt)
+            line.size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+    hor_text_heights = [sum([line.size[1] + line_spacing for line in lines]) - line_spacing for lines in hor_texts]
+    ver_text_heights = [sum([line.size[1] + line_spacing for line in lines]) - line_spacing * len(lines) for lines in ver_texts]
+
+    pad_top = max(hor_text_heights) + line_spacing * 2
 
     result = Image.new("RGB", (im.width + pad_left, im.height + pad_top), "white")
     result.paste(im, (pad_left, pad_top))
 
     d = ImageDraw.Draw(result)
 
-    boundary = math.ceil(len(prompts) / 2)
-    prompts_horiz = [wrap(x, fnt, width) for x in prompts[:boundary]]
-    prompts_vert = [wrap(x, fnt, pad_left) for x in prompts[boundary:]]
-
-    sizes_hor = [(x[2] - x[0], x[3] - x[1]) for x in [d.multiline_textbbox((0, 0), x, font=fnt) for x in prompts_horiz]]
-    sizes_ver = [(x[2] - x[0], x[3] - x[1]) for x in [d.multiline_textbbox((0, 0), x, font=fnt) for x in prompts_vert]]
-    hor_text_height = sum([x[1] + line_spacing for x in sizes_hor]) - line_spacing
-    ver_text_height = sum([x[1] + line_spacing for x in sizes_ver]) - line_spacing
-
     for col in range(cols):
         x = pad_left + width * col + width / 2
-        y = pad_top / 2 - hor_text_height / 2
+        y = pad_top / 2 - hor_text_heights[col] / 2
 
-        draw_texts(col, x, y, prompts_horiz, sizes_hor)
+        draw_texts(d, x, y, hor_texts[col])
 
     for row in range(rows):
         x = pad_left / 2
-        y = pad_top + height * row + height / 2 - ver_text_height / 2
+        y = pad_top + height * row + height / 2 - ver_text_heights[row] / 2
 
-        draw_texts(row, x, y, prompts_vert, sizes_ver)
+        draw_texts(d, x, y, ver_texts[row])
 
     return result
+
+
+def draw_prompt_matrix(im, width, height, all_prompts):
+    prompts = all_prompts[1:]
+    boundary = math.ceil(len(prompts) / 2)
+
+    prompts_horiz = prompts[:boundary]
+    prompts_vert = prompts[boundary:]
+
+    hor_texts = [[GridAnnotation(x, is_active=pos & (1 << i) != 0) for i, x in enumerate(prompts_horiz)] for pos in range(1 << len(prompts_horiz))]
+    ver_texts = [[GridAnnotation(x, is_active=pos & (1 << i) != 0) for i, x in enumerate(prompts_vert)] for pos in range(1 << len(prompts_vert))]
+
+    return draw_grid_annotations(im, width, height, hor_texts, ver_texts)
+
+
+def draw_xy_grid(xs, ys, x_label, y_label, cell):
+    res = []
+
+    ver_texts = [[GridAnnotation(y_label(y))] for y in ys]
+    hor_texts = [[GridAnnotation(x_label(x))] for x in xs]
+
+    for y in ys:
+        for x in xs:
+            res.append(cell(x, y))
+
+    grid = image_grid(res, rows=len(ys))
+    grid = draw_grid_annotations(grid, res[0].width, res[0].height, hor_texts, ver_texts)
+
+    return grid
 
 
 def resize_image(resize_mode, im, width, height):
@@ -438,17 +596,7 @@ def wrap_gradio_call(func):
     return f
 
 
-GFPGAN = None
-if os.path.exists(cmd_opts.gfpgan_dir):
-    try:
-        GFPGAN = load_gfpgan()
-        print("Loaded GFPGAN")
-    except Exception:
-        print("Error loading GFPGAN:", file=sys.stderr)
-        print(traceback.format_exc(), file=sys.stderr)
-
-
-class StableDiffuionModelHijack:
+class StableDiffusionModelHijack:
     ids_lookup = {}
     word_embeddings = {}
     word_embeddings_checksums = {}
@@ -481,7 +629,7 @@ class StableDiffuionModelHijack:
             assert len(param_dict) == 1, 'embedding file has multiple terms in it'
             emb = next(iter(param_dict.items()))[1].reshape(768)
             self.word_embeddings[name] = emb
-            self.word_embeddings_checksums[name] = f'{const_hash(emb)&0xffff:04x}'
+            self.word_embeddings_checksums[name] = f'{const_hash(emb) & 0xffff:04x}'
 
             ids = tokenizer([name], add_special_tokens=False)['input_ids'][0]
 
@@ -570,7 +718,7 @@ class FrozenCLIPEmbedderWithCustomWords(torch.nn.Module):
                     else:
                         found = False
                         for ids, word in possible_matches:
-                            if tokens[i:i+len(ids)] == ids:
+                            if tokens[i:i + len(ids)] == ids:
                                 fixes.append((len(remade_tokens), word))
                                 remade_tokens.append(777)
                                 multipliers.append(mult)
@@ -594,7 +742,7 @@ class FrozenCLIPEmbedderWithCustomWords(torch.nn.Module):
                     self.hijack.comments.append(f"Warning: too many input tokens; some ({len(overflowing_words)}) have been truncated:\n{overflowing_text}\n")
 
                 remade_tokens = remade_tokens + [id_end] * (maxlen - 2 - len(remade_tokens))
-                remade_tokens = [id_start] + remade_tokens[0:maxlen-2] + [id_end]
+                remade_tokens = [id_start] + remade_tokens[0:maxlen - 2] + [id_end]
                 cache[tuple_tokens] = (remade_tokens, fixes, multipliers)
 
             multipliers = multipliers + [1.0] * (maxlen - 2 - len(multipliers))
@@ -607,7 +755,7 @@ class FrozenCLIPEmbedderWithCustomWords(torch.nn.Module):
         if len(used_custom_terms) > 0:
             self.hijack.comments.append("Used custom terms: " + ", ".join([f'{word} [{checksum}]' for word, checksum in used_custom_terms]))
 
-        tokens = torch.asarray(remade_batch_tokens).to(self.wrapped.device)
+        tokens = torch.asarray(remade_batch_tokens).to(device)
         outputs = self.wrapped.transformer(input_ids=tokens)
         z = outputs.last_hidden_state
 
@@ -642,7 +790,7 @@ class EmbeddingsWithFixes(nn.Module):
 
 
 class StableDiffusionProcessing:
-    def __init__(self, outpath=None, prompt="", seed=-1, sampler_index=0, batch_size=1, n_iter=1, steps=50, cfg_scale=7.0, width=512, height=512, prompt_matrix=False, use_GFPGAN=False, strength_GFPGAN = 1.0, do_not_save_grid=False, extra_generation_params=None):
+    def __init__(self, outpath=None, prompt="", seed=-1, sampler_index=0, batch_size=1, n_iter=1, steps=50, cfg_scale=7.0, width=512, height=512, prompt_matrix=False, use_GFPGAN=False, do_not_save_samples=False, do_not_save_grid=False, strength_GFPGAN=1.0, extra_generation_params=None, overlay_images=None):
         self.outpath: str = outpath
         self.prompt: str = prompt
         self.seed: int = seed
@@ -655,9 +803,11 @@ class StableDiffusionProcessing:
         self.height: int = height
         self.prompt_matrix: bool = prompt_matrix
         self.use_GFPGAN: bool = use_GFPGAN
-        self.strength_GFPGAN: bool = strength_GFPGAN
+        self.do_not_save_samples: bool = do_not_save_samples
         self.do_not_save_grid: bool = do_not_save_grid
+        self.strength_GFPGAN: bool = strength_GFPGAN
         self.extra_generation_params: dict = extra_generation_params
+        self.overlay_images = overlay_images
 
     def init(self):
         pass
@@ -703,6 +853,9 @@ class KDiffusionSampler:
         return samples_ddim
 
 
+Processed = namedtuple('Processed', ['images', 'seed', 'info'])
+
+
 class OutputInfo:
     def __init__(self, prompt: str, params: str, comments: str):
         self.prompt = prompt.strip()
@@ -711,7 +864,7 @@ class OutputInfo:
 
     def __str__(self):
         return '\n'.join([self.prompt, self.params, self.comments])
-    
+
     def html(self) -> str:
         return f'''
         {plaintext_to_html(self.prompt, "prompt-info")}<br>
@@ -719,7 +872,8 @@ class OutputInfo:
         {plaintext_to_html(self.comments, "comments-info")}
         '''
 
-def process_images(p: StableDiffusionProcessing):
+
+def process_images(p: StableDiffusionProcessing) -> Processed:
     """this is the main loop that both txt2img and img2img use; it calls func_init once inside all the scopes and func_sample once per batch"""
 
     prompt = p.prompt
@@ -730,10 +884,7 @@ def process_images(p: StableDiffusionProcessing):
 
     seed = int(random.randrange(4294967294) if p.seed == -1 else p.seed)
 
-    os.makedirs(p.outpath, exist_ok=True)
-
     sample_path = os.path.join(p.outpath, "samples")
-    os.makedirs(sample_path, exist_ok=True)
     base_count = len(os.listdir(sample_path))
     grid_count = len(os.listdir(p.outpath)) - 1
 
@@ -767,7 +918,7 @@ def process_images(p: StableDiffusionProcessing):
         "Sampler": samplers[p.sampler_index].name,
         "CFG": p.cfg_scale,
         "Seed": seed,
-        "GFPGAN": ("GFPGAN" if p.use_GFPGAN and GFPGAN is not None else None)
+        "GFPGAN": ("GFPGAN" if p.use_GFPGAN else None)
     }
 
     if p.extra_generation_params is not None:
@@ -782,7 +933,9 @@ def process_images(p: StableDiffusionProcessing):
         model_hijack.load_textual_inversion_embeddings(cmd_opts.embeddings_dir, model)
 
     output_images = []
-    with torch.no_grad(), autocast("cuda"), model.ema_scope():
+    precision_scope = autocast if cmd_opts.precision == "autocast" else nullcontext
+    ema_scope = (nullcontext if cmd_opts.lowvram else model.ema_scope)
+    with torch.no_grad(), precision_scope("cuda"), ema_scope():
         p.init()
 
         for n in range(p.n_iter):
@@ -808,26 +961,37 @@ def process_images(p: StableDiffusionProcessing):
                     # TODO: convert to BGR colorspace?
                     x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
                     x_sample = x_sample.astype(np.uint8)
-                    x_sample_bgr = x_sample[:,:,::-1]
 
-                    if p.use_GFPGAN and GFPGAN is not None and p.strength_GFPGAN > 0.0:
+                    if p.use_GFPGAN and have_gfpgan and p.strength_GFPGAN > 0.0:
                         torch_gc()
-                        cropped_faces, restored_faces, gfpgan_output_bgr = GFPGAN.enhance(x_sample_bgr, has_aligned=False, only_center_face=False, paste_back=True)
-                        gfpgan_output_rgb = gfpgan_output_bgr[:,:,::-1]
-                        output_image = Image.fromarray(gfpgan_output_rgb)
+
+                        gfpgan_model = gfpgan()
+                        x_sample_bgr = x_sample[:, :, ::-1]
+                        cropped_faces, restored_faces, gfpgan_output_bgr = gfpgan_model.enhance(x_sample_bgr, has_aligned=False, only_center_face=False, paste_back=True)
+                        image = Image.fromarray(gfpgan_output_bgr[:, :, ::-1])
 
                         if p.strength_GFPGAN < 1.0:
-                            output_image = Image.blend(Image.fromarray(x_sample), output_image, p.strength_GFPGAN)
+                            image = Image.blend(Image.fromarray(x_sample), image, p.strength_GFPGAN)
                     else:
-                        output_image = Image.fromarray(x_sample)
+                        image = Image.fromarray(x_sample)
 
-                    save_image(output_image, sample_path, f"{base_count:05}", seeds[i], prompts[i], opts.samples_format, info=str(infotext()))
-                    output_images.append(output_image)
+                    if p.overlay_images is not None and i < len(p.overlay_images):
+                        image = image.convert('RGBA')
+                        image.alpha_composite(p.overlay_images[i])
+                        image = image.convert('RGB')
+
+                    if not p.do_not_save_samples:
+                        save_image(image, sample_path, f"{base_count:05}", seeds[i], prompts[i], opts.samples_format, info=str(infotext()))
+
+                    output_images.append(image)
                     base_count += 1
 
-        if (p.prompt_matrix or opts.grid_save) and not p.do_not_save_grid:
+        unwanted_grid_because_of_img_count = len(output_images) < 2 and opts.grid_only_if_multiple
+        if (p.prompt_matrix or opts.grid_save) and not p.do_not_save_grid and not unwanted_grid_because_of_img_count:
+            return_grid = opts.return_grid
+
             if p.prompt_matrix:
-                grid = image_grid(output_images, p.batch_size, force_n_rows=1 << ((len(prompt_matrix_parts)-1)//2))
+                grid = image_grid(output_images, p.batch_size, rows=1 << ((len(prompt_matrix_parts) - 1) // 2))
 
                 try:
                     grid = draw_prompt_matrix(grid, p.width, p.height, prompt_matrix_parts)
@@ -836,15 +1000,18 @@ def process_images(p: StableDiffusionProcessing):
                     print("Error creating prompt_matrix text:", file=sys.stderr)
                     print(traceback.format_exc(), file=sys.stderr)
 
-                output_images.insert(0, grid)
+                return_grid = True
             else:
                 grid = image_grid(output_images, p.batch_size)
+
+            if return_grid:
+                output_images.insert(0, grid)
 
             save_image(grid, p.outpath, f"grid-{grid_count:04}", seed, prompt, opts.grid_format, info=str(infotext()), short_filename=not opts.grid_extended_filename)
             grid_count += 1
 
     torch_gc()
-    return output_images, seed, infotext()
+    return Processed(output_images, seed, infotext())
 
 
 class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
@@ -858,7 +1025,7 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         return samples_ddim
 
 
-def txt2img(prompt: str, ddim_steps: int, sampler_index: int, use_GFPGAN: bool, strength_GFPGAN: float, prompt_matrix: bool, n_iter: int, batch_size: int, cfg_scale: float, seed: int, height: int, width: int):
+def txt2img(prompt: str, steps: int, sampler_index: int, use_GFPGAN: bool, strength_GFPGAN: float, prompt_matrix: bool, n_iter: int, batch_size: int, cfg_scale: float, seed: int, height: int, width: int, code: str):
     outpath = opts.outdir or "outputs/txt2img-samples"
 
     p = StableDiffusionProcessingTxt2Img(
@@ -868,7 +1035,7 @@ def txt2img(prompt: str, ddim_steps: int, sampler_index: int, use_GFPGAN: bool, 
         sampler_index=sampler_index,
         batch_size=batch_size,
         n_iter=n_iter,
-        steps=ddim_steps,
+        steps=steps,
         cfg_scale=cfg_scale,
         width=width,
         height=height,
@@ -877,9 +1044,30 @@ def txt2img(prompt: str, ddim_steps: int, sampler_index: int, use_GFPGAN: bool, 
         strength_GFPGAN=strength_GFPGAN
     )
 
-    output_images, seed, info = process_images(p)
+    if code != '' and cmd_opts.allow_code:
+        p.do_not_save_grid = True
+        p.do_not_save_samples = True
 
-    return output_images, info.html()
+        display_result_data = [[], -1, OutputInfo("", "", "")]
+
+        def display(imgs, s=display_result_data[1], i=display_result_data[2]):
+            display_result_data[0] = imgs
+            display_result_data[1] = s
+            display_result_data[2] = i
+
+        from types import ModuleType
+        compiled = compile(code, '', 'exec')
+        module = ModuleType("testmodule")
+        module.__dict__.update(globals())
+        module.p = p
+        module.display = display
+        exec(compiled, module.__dict__)
+
+        processed = Processed(*display_result_data)
+    else:
+        processed = process_images(p)
+
+    return processed.images, processed.info.html()
 
 
 class Flagging(gr.FlaggingCallback):
@@ -893,7 +1081,7 @@ class Flagging(gr.FlaggingCallback):
         os.makedirs("log/images", exist_ok=True)
 
         # those must match the "txt2img" function
-        prompt, ddim_steps, sampler_name, use_gfpgan, prompt_matrix, ddim_eta, n_iter, n_samples, cfg_scale, request_seed, height, width, images, seed, comment = flag_data
+        prompt, steps, sampler_index, use_gfpgan, gfpgan_strength, prompt_matrix, n_iter, batch_size, cfg_scale, seed, height, width, code, images, seed, comment = flag_data
 
         filenames = []
 
@@ -908,7 +1096,7 @@ class Flagging(gr.FlaggingCallback):
 
             filename_base = str(int(time.time() * 1000))
             for i, filedata in enumerate(images):
-                filename = "log/images/"+filename_base + ("" if len(images) == 1 else "-"+str(i+1)) + ".png"
+                filename = "log/images/" + filename_base + ("" if len(images) == 1 else "-" + str(i + 1)) + ".png"
 
                 if filedata.startswith("data:image/png;base64,"):
                     filedata = filedata[len("data:image/png;base64,"):]
@@ -918,23 +1106,49 @@ class Flagging(gr.FlaggingCallback):
 
                 filenames.append(filename)
 
-            writer.writerow([prompt, seed, width, height, cfg_scale, ddim_steps, filenames[0]])
+            writer.writerow([prompt, seed, width, height, cfg_scale, steps, filenames[0]])
 
         print("Logged:", filenames[0])
+
+
+def fill(image, mask):
+    image_mod = Image.new('RGBA', (image.width, image.height))
+
+    image_masked = Image.new('RGBa', (image.width, image.height))
+    image_masked.paste(image.convert("RGBA").convert("RGBa"), mask=ImageOps.invert(mask.convert('L')))
+
+    image_masked = image_masked.convert('RGBa')
+
+    for radius, repeats in [(64, 1), (16, 2), (4, 4), (2, 2), (0, 1)]:
+        blurred = image_masked.filter(ImageFilter.GaussianBlur(radius)).convert('RGBA')
+        for _ in range(repeats):
+            image_mod.alpha_composite(blurred)
+
+    return image_mod.convert("RGB")
+
 
 class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     sampler = None
 
-    def __init__(self, init_images=None, resize_mode=0, denoising_strength=0.75, **kwargs):
+    def __init__(self, init_images=None, resize_mode=0, denoising_strength=0.75, mask=None, mask_blur=4, inpainting_fill=0, **kwargs):
         super().__init__(**kwargs)
 
         self.init_images = init_images
         self.resize_mode: int = resize_mode
         self.denoising_strength: float = denoising_strength
         self.init_latent = None
+        self.original_mask = mask
+        self.mask_blur = mask_blur
+        self.inpainting_fill = inpainting_fill
+        self.mask = None
+        self.nmask = None
 
     def init(self):
         self.sampler = samplers_for_img2img[self.sampler_index].constructor()
+
+        if self.original_mask is not None:
+            self.original_mask = resize_image(self.resize_mode, self.original_mask, self.width, self.height)
+            self.overlay_images = []
 
         imgs = []
 
@@ -944,12 +1158,25 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         for img in self.init_images:
             image = img.convert("RGB")
             image = resize_image(self.resize_mode, image, self.width, self.height)
+
+            if self.original_mask is not None:
+                if self.inpainting_fill != 1:
+                    image = fill(image, self.original_mask)
+
+                image_masked = Image.new('RGBa', (image.width, image.height))
+                image_masked.paste(image.convert("RGBA").convert("RGBa"), mask=ImageOps.invert(self.original_mask.convert('L')))
+
+                self.overlay_images.append(image_masked.convert('RGBA'))
+
             image = np.array(image).astype(np.float32) / 255.0
             image = np.moveaxis(image, 2, 0)
+
             imgs.append(image)
 
         if len(imgs) == 1:
             batch_images = np.expand_dims(imgs[0], axis=0).repeat(self.batch_size, axis=0)
+            if self.overlay_images is not None:
+                self.overlay_images = self.overlay_images * self.batch_size
         elif len(imgs) <= self.batch_size:
             self.batch_size = len(imgs)
             batch_images = np.array(imgs)
@@ -962,20 +1189,53 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
         self.init_latent = sd_model.get_first_stage_encoding(sd_model.encode_first_stage(image))
 
+        if self.original_mask is not None:
+            if self.mask_blur > 0:
+                self.original_mask = self.original_mask.filter(ImageFilter.GaussianBlur(self.mask_blur)).convert('L')
+
+            latmask = self.original_mask.convert('RGB').resize((self.init_latent.shape[3], self.init_latent.shape[2]))
+            latmask = np.moveaxis(np.array(latmask, dtype=np.float), 2, 0) / 255
+            latmask = latmask[0]
+            latmask = np.tile(latmask[None], (4, 1, 1))
+
+            self.mask = torch.asarray(1.0 - latmask).to(device).type(sd_model.dtype)
+            self.nmask = torch.asarray(latmask).to(device).type(sd_model.dtype)
+
     def sample(self, x, conditioning, unconditional_conditioning):
-        t_enc = int(self.denoising_strength * self.steps)
+        t_enc = int(min(self.denoising_strength, 0.999) * self.steps)
 
         sigmas = self.sampler.model_wrap.get_sigmas(self.steps)
         noise = x * sigmas[self.steps - t_enc - 1]
-
         xi = self.init_latent + noise
+
+        if self.mask is not None:
+            if self.inpainting_fill == 2:
+                xi = xi * self.mask + noise * self.nmask
+            elif self.inpainting_fill == 3:
+                xi = xi * self.mask
+
         sigma_sched = sigmas[self.steps - t_enc - 1:]
-        samples_ddim = self.sampler.func(self.sampler.model_wrap_cfg, xi, sigma_sched, extra_args={'cond': conditioning, 'uncond': unconditional_conditioning, 'cond_scale': self.cfg_scale}, disable=False)
+
+        def mask_cb(v):
+            v["denoised"][:] = v["denoised"][:] * self.nmask + self.init_latent * self.mask
+
+        samples_ddim = self.sampler.func(self.sampler.model_wrap_cfg, xi, sigma_sched, extra_args={'cond': conditioning, 'uncond': unconditional_conditioning, 'cond_scale': self.cfg_scale}, disable=False, callback=mask_cb if self.mask is not None else None)
+
+        if self.mask is not None:
+            samples_ddim = samples_ddim * self.nmask + self.init_latent * self.mask
+
         return samples_ddim
 
 
-def img2img(prompt: str, init_img, ddim_steps: int, sampler_index: int, use_GFPGAN: bool, strength_GFPGAN: float, prompt_matrix, loopback: bool, sd_upscale: bool, n_iter: int, batch_size: int, cfg_scale: float, denoising_strength: float, seed: int, height: int, width: int, resize_mode: int):
+def img2img(prompt: str, init_img, init_img_with_mask, ddim_steps: int, sampler_index: int, mask_blur: int, inpainting_fill: int, use_GFPGAN: bool, strength_GFPGAN: float, prompt_matrix, loopback: bool, sd_upscale: bool, n_iter: int, batch_size: int, cfg_scale: float, denoising_strength: float, seed: int, height: int, width: int, resize_mode: int):
     outpath = opts.outdir or "outputs/img2img-samples"
+
+    if init_img_with_mask is not None:
+        image = init_img_with_mask['image']
+        mask = init_img_with_mask['mask']
+    else:
+        image = init_img
+        mask = None
 
     assert 0. <= denoising_strength <= 1., 'can only work with strength in [0.0, 1.0]'
 
@@ -993,7 +1253,10 @@ def img2img(prompt: str, init_img, ddim_steps: int, sampler_index: int, use_GFPG
         prompt_matrix=prompt_matrix,
         use_GFPGAN=use_GFPGAN,
         strength_GFPGAN=strength_GFPGAN,
-        init_images=[init_img],
+        init_images=[image],
+        mask=mask,
+        mask_blur=mask_blur,
+        inpainting_fill=inpainting_fill,
         resize_mode=resize_mode,
         denoising_strength=denoising_strength,
         extra_generation_params={"DNS": denoising_strength}
@@ -1003,35 +1266,37 @@ def img2img(prompt: str, init_img, ddim_steps: int, sampler_index: int, use_GFPG
         output_images, info = None, None
         history = []
         initial_seed = None
+        initial_info = None
 
         for i in range(n_iter):
             p.n_iter = 1
             p.batch_size = 1
             p.do_not_save_grid = True
 
-            output_images, seed, info = process_images(p)
+            processed = process_images(p)
 
             if initial_seed is None:
-                initial_seed = seed
+                initial_seed = processed.seed
+                initial_info = processed.info
 
-            p.init_img = output_images[0]
-            p.seed = seed + 1
+            p.init_img = processed.images[0]
+            p.seed = processed.seed + 1
             p.denoising_strength = max(p.denoising_strength * 0.95, 0.1)
-            history.append(output_images[0])
+            history.append(processed.images[0])
 
         grid_count = len(os.listdir(outpath)) - 1
-        grid = image_grid(history, batch_size, force_n_rows=1)
+        grid = image_grid(history, batch_size, rows=1)
 
         save_image(grid, outpath, f"grid-{grid_count:04}", initial_seed, prompt, opts.grid_format, info=str(info), short_filename=not opts.grid_extended_filename)
 
-        output_images = history
-        seed = initial_seed
+        processed = Processed(history, initial_seed, initial_info)
 
     elif sd_upscale:
         initial_seed = None
         initial_info = None
 
-        img = upscale_with_realesrgan(init_img, RealESRGAN_upscaling=2, RealESRGAN_model_index=0)
+        upscaler = sd_upscalers[opts.sd_upscale_upscaler_index]
+        img = upscaler(init_img)
 
         torch_gc()
 
@@ -1039,6 +1304,7 @@ def img2img(prompt: str, init_img, ddim_steps: int, sampler_index: int, use_GFPG
 
         p.n_iter = 1
         p.do_not_save_grid = True
+        p.do_not_save_samples = True
 
         work = []
         work_results = []
@@ -1051,16 +1317,16 @@ def img2img(prompt: str, init_img, ddim_steps: int, sampler_index: int, use_GFPG
         print(f"SD upscaling will process a total of {len(work)} images tiled as {len(grid.tiles[0][2])}x{len(grid.tiles)} in a total of {batch_count} batches.")
 
         for i in range(batch_count):
-            p.init_images = work[i*p.batch_size:(i+1)*p.batch_size]
+            p.init_images = work[i * p.batch_size:(i + 1) * p.batch_size]
 
-            output_images, seed, info = process_images(p)
+            processed = process_images(p)
 
             if initial_seed is None:
-                initial_seed = seed
-                initial_info = info
+                initial_seed = processed.seed
+                initial_info = processed.info
 
-            p.seed = seed + 1
-            work_results += output_images
+            p.seed = processed.seed + 1
+            work_results += processed.images
 
         image_index = 0
         for y, h, row in grid.tiles:
@@ -1073,14 +1339,13 @@ def img2img(prompt: str, init_img, ddim_steps: int, sampler_index: int, use_GFPG
         grid_count = len(os.listdir(outpath)) - 1
         save_image(combined_image, outpath, f"grid-{grid_count:04}", initial_seed, prompt, opts.grid_format, info=str(initial_info), short_filename=not opts.grid_extended_filename)
 
-        output_images = [combined_image]
-        seed = initial_seed
-        info = initial_info
+        processed = Processed([combined_image], initial_seed, initial_info)
 
     else:
-        output_images, seed, info = process_images(p)
+        processed = process_images(p)
 
-    return output_images, info.html()
+    return processed.images, processed.info.html()
+
 
 def upscale_with_realesrgan(image, RealESRGAN_upscaling, RealESRGAN_model_index):
     info = realesrgan_models[RealESRGAN_model_index]
@@ -1109,10 +1374,11 @@ def run_extras(image, GFPGAN_strength, RealESRGAN_upscaling, RealESRGAN_model_in
 
     outpath = opts.outdir or "outputs/extras-samples"
 
-    if GFPGAN is not None and GFPGAN_strength > 0:
-        img_data_bgr = np.array(image, dtype=np.uint8)[:,:,::-1]
-        cropped_faces, restored_faces, restored_img = GFPGAN.enhance(img_data_bgr, has_aligned=False, only_center_face=False, paste_back=True)
-        img_data_rgb = restored_img[:,:,::-1]
+    if have_gfpgan and GFPGAN_strength > 0:
+        gfpgan_model = gfpgan()
+        img_data_bgr = np.array(image, dtype=np.uint8)[:, :, ::-1]
+        cropped_faces, restored_faces, restored_img = gfpgan_model.enhance(img_data_bgr, has_aligned=False, only_center_face=False, paste_back=True)
+        img_data_rgb = restored_img[:, :, ::-1]
         res = Image.fromarray(img_data_rgb)
 
         if GFPGAN_strength < 1.0:
@@ -1123,12 +1389,39 @@ def run_extras(image, GFPGAN_strength, RealESRGAN_upscaling, RealESRGAN_model_in
     if have_realesrgan and RealESRGAN_upscaling != 1.0:
         image = upscale_with_realesrgan(image, RealESRGAN_upscaling, RealESRGAN_model_index)
 
-    os.makedirs(outpath, exist_ok=True)
     base_count = len(os.listdir(outpath))
-
     save_image(image, outpath, f"{base_count:05}", None, '', opts.samples_format, short_filename=True)
 
     return [image], 0, ''
+
+
+def run_pnginfo(image):
+    info = ''
+    for key, text in image.info.items():
+        info += f"""
+<div>
+<p><b>{plaintext_to_html(str(key))}</b></p>
+<p>{plaintext_to_html(str(text))}</p>
+</div>
+""".strip() + "\n"
+
+    if len(info) == 0:
+        message = "Nothing found in the image."
+        info = f"<div><p>{message}<p></div>"
+
+    return [info]
+
+
+pnginfo_interface = gr.Interface(
+    wrap_gradio_call(run_pnginfo),
+    inputs=[
+        gr.Image(label="Source", source="upload", interactive=True, type="pil"),
+    ],
+    outputs=[
+        gr.HTML(),
+    ],
+    allow_flagging="never",
+)
 
 opts = Options()
 if os.path.exists(config_filename):
@@ -1140,7 +1433,7 @@ def run_settings(*args):
         opts.data[key] = value
 
     opts.save(config_filename)
-    
+
     return plaintext_to_html(f'Settings saved @ {datetime.now().strftime("%I:%M:%S")}')
 
 
@@ -1164,43 +1457,48 @@ def create_setting_component(key):
 
     return item
 
+
 sd_config = OmegaConf.load(cmd_opts.config)
 sd_model = load_model_from_config(sd_config, cmd_opts.ckpt)
+sd_model = (sd_model if cmd_opts.no_half else sd_model.half())
 
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-sd_model = (sd_model if cmd_opts.no_half else sd_model.half()).to(device)
+if not cmd_opts.lowvram:
+    sd_model = sd_model.to(device)
 
-model_hijack = StableDiffuionModelHijack()
+else:
+    setup_for_low_vram(sd_model)
+
+model_hijack = StableDiffusionModelHijack()
 model_hijack.hijack(sd_model)
 
+
 def do_generate(
-    mode: str,
-    prompt: str,
-    cfg: float,
-    denoise: float,
-    sampler_index: str,
-    sampler_steps: int,
-    batch_count: int,
-    batch_size: int,
-    input_img,
-    resize_mode,
-    image_height: int,
-    image_width: int,
-    use_input_seed: bool,
-    input_seed: int,
-    facefix: bool,
-    facefix_strength: float,
-    prompt_matrix: bool,
-    loopback: bool,
-    upscale: bool):
-    
+        mode: str,
+        prompt: str,
+        cfg: float,
+        denoise: float,
+        sampler_index: int,
+        sampler_steps: int,
+        batch_count: int,
+        batch_size: int,
+        input_img,
+        resize_mode,
+        image_height: int,
+        image_width: int,
+        custom_code: str,
+        input_seed: int,
+        facefix: bool,
+        facefix_strength: float,
+        prompt_matrix: bool,
+        loopback: bool,
+        upscale: bool,
+        inpainting_mask_blur,
+        inpainting_mask_content,
+        inpainting_image,
+):
+
     if mode == 'Text-to-Image' or mode == 'Image-to-Image':
-        # validate some settings to generate useful error messages
-        if image_height % 64 != 0:
-            raise Exception("Image height must be a multiple of 64")
-        elif image_width % 64 != 0:
-            raise Exception("Image width must be a multiple of 64")
-        elif batch_count <= 0:
+        if batch_count <= 0:
             raise Exception("Batch count must be > 0")
         elif batch_size <= 0:
             raise Exception("Images per batch must be > 0")
@@ -1208,7 +1506,7 @@ def do_generate(
     if mode == 'Text-to-Image':
         return txt2img(
             prompt=prompt,
-            ddim_steps=sampler_steps,
+            steps=sampler_steps,
             sampler_index=sampler_index,
             use_GFPGAN=facefix,
             strength_GFPGAN=facefix_strength,
@@ -1216,16 +1514,21 @@ def do_generate(
             n_iter=batch_count,
             batch_size=batch_size,
             cfg_scale=cfg,
-            seed=input_seed if use_input_seed else -1,
+            seed=input_seed,
             height=image_height,
-            width=image_width
+            width=image_width,
+            code=custom_code,
+
         )
-    elif mode == 'Image-to-Image':
+    elif mode == 'Image-to-Image' or mode == 'Inpainting':
         return img2img(
             prompt=prompt,
             init_img=input_img,
+            init_img_with_mask=inpainting_image,
             ddim_steps=sampler_steps,
             sampler_index=sampler_index,
+            mask_blur=inpainting_mask_blur,
+            inpainting_fill=inpainting_mask_content,
             use_GFPGAN=facefix,
             strength_GFPGAN=facefix_strength,
             prompt_matrix=prompt_matrix,
@@ -1235,10 +1538,10 @@ def do_generate(
             batch_size=batch_size,
             cfg_scale=cfg,
             denoising_strength=denoise,
-            seed=input_seed if use_input_seed else -1,
+            seed=input_seed,
             height=image_height,
             width=image_width,
-            resize_mode=resize_mode
+            resize_mode=resize_mode,
         )
     elif mode == 'Post-Processing':
         return run_extras(
@@ -1250,111 +1553,100 @@ def do_generate(
 
     raise Exception('Invalid mode selected')
 
+
 css_hide_progressbar = \
-"""
-.wrap .m-12 svg { display:none!important; }
-.wrap .m-12::before { content:"Loading..." }
-.progress-bar { display:none!important; }
-.meta-text { display:none!important; }
-"""
+    """
+    .wrap .m-12 svg { display:none!important; }
+    .wrap .m-12::before { content:"Loading..." }
+    .progress-bar { display:none!important; }
+    .meta-text { display:none!important; }
+    """
 
 main_css = \
-"""
-.output-html p { margin: 0 0.5em; }
-.performance, .params-info, .comments-info { font-size: 0.85em; color: #666; }
-"""
+    """
+    .output-html p { margin: 0 0.5em; }
+    .performance, .params-info, .comments-info { font-size: 0.85em; color: #666; }
+    """
 
 # [data-testid="image"] {min-height: 512px !important}
 # #generate{width: 100%;}
 custom_css = \
-"""
-/* hide scrollbars, better scaling for gallery, small padding for main image */
-::-webkit-scrollbar { display: none }
-#output_gallery {
-    min-height: 50vh !important;
-    scrollbar-width: none;
-}
+    """
+    /* hide scrollbars, better scaling for gallery, small padding for main image */
+    ::-webkit-scrollbar { display: none }
+    #output_gallery {
+        min-height: 50vh !important;
+        scrollbar-width: none;
+    }
+    
+    #output_gallery > div > img {
+        padding-top: 0.5rem;
+        padding-right: 0.5rem;
+        padding-left: 0.5rem;
+    }
+    
+    /* remove excess padding around prompt textbox, increase font size */
+    #prompt_row input { font-size: 16px }
+    #prompt_input {
+        padding-top: 0.25rem !important;
+        padding-bottom: 0rem !important;
+        padding-left: 0rem !important;
+        padding-right: 0rem !important;
+        border-style: none !important;
+    }
+    
+    /* remove excess padding from mode dropdown, change appear to a button */
+    #sd_mode {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        border-style: none !important;
+    }
+    
+    #sd_mode > label > select {
+        font-weight: 600;
+        min-height: 42px;
+        max-height: 42px;
+        text-align: center;
+        font-size: 1rem;
+        appearance: none;
+        -webkit-appearance: none;
+        background-position: left;
+        background-size: contain;
+        padding-right: 0;
+        border-color: rgb(75 85 99 / var(--tw-border-opacity));
+        width: 15rem;
+        float: right;
+    }
+    
+    /* custom column scaling (odd = right/left, even = center) */
+    #body>.col:nth-child(odd) {
+        max-width: 450px;
+        min-width: 300px;
+    }
+    #body>.col:nth-child(even) {
+        width:250%;
+    }
+    
+    /* better overall scaling + limits */
+    .container {
+        max-width: min(1600px, 95%);
+    }
 
-#output_gallery > div > img {
-    padding-top: 0.5rem;
-    padding-right: 0.5rem;
-    padding-left: 0.5rem;
-}
+    /* generate button size */
+    #sd_generate {
+        width: 15rem;
+        flex: none;
+    }
 
-/* remove excess padding around prompt textbox, increase font size */
-#prompt_row input { font-size: 16px }
-#prompt_input {
-    padding-top: 0.25rem !important;
-    padding-bottom: 0rem !important;
-    padding-left: 0rem !important;
-    padding-right: 0rem !important;
-    border-style: none !important;
-}
-
-/* remove excess padding from mode dropdown, change appear to a button */
-#sd_mode {
-    padding-top: 0 !important;
-    padding-bottom: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-    border-style: none !important;
-
-}
-
-#sd_mode > label > select {
-    font-weight: 600;
-    min-height: 42px;
-    max-height: 42px;
-    text-align: center;
-    font-size: 1rem;
-    appearance: none;
-    background-image: linear-gradient(90deg, #4b5563, #374151);
-    -webkit-appearance: none;
-    background-position: left;
-    background-size: contain;
-    padding-right: 0;
-    border-color: rgb(75 85 99 / var(--tw-border-opacity));
-    width: 15rem;
-    float: right;
-}
-
-/* custom column scaling (odd = right/left, even = center) */
-#body>.col:nth-child(odd) {
-    max-width: 450px;
-    min-width: 300px;
-}
-#body>.col:nth-child(even) {
-    width:250%;
-}
-
-/* better overall scaling + limits */
-.container {
-    max-width: min(1600px, 95%);
-}
-
-/* hide increment/decrement buttons on number inputs */
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-input[type="number"] {
-    -moz-appearance: textfield;
-}
-
-/* generate button size */
-#sd_generate {
-    width: 15rem;
-    flex: none;
-}
-
-/* save button */
-#sd_save_settings {
-    width: 15rem;
-    flex: none;
-    margin-left: auto;
-}
-"""
+    /* save button */
+    #sd_save_settings {
+        width: 15rem;
+        flex: none;
+        margin-left: auto;
+    }
+    """
 
 full_css = main_css + css_hide_progressbar + custom_css
 
@@ -1367,112 +1659,99 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             with gr.Row(elem_id='body').style(equal_height=False):
                 # Left Column
                 with gr.Column():
-                    with gr.Row():
-                        sd_image_height = \
-                            gr.Number(label="Image height", value=512, precision=0, elem_id='img_height')
-                        sd_image_width = \
-                            gr.Number(label="Image width", value=512, precision=0, elem_id='img_width')
+                    sd_image_height = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", elem_id='img_height', value=512)
+
+                    sd_image_width = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", elem_id='img_width', value=512)
 
                     with gr.Row():
-                        sd_batch_count = \
-                            gr.Number(label='Batch count', precision=0, value=1)
-                        sd_batch_size = \
-                            gr.Number(label='Images per batch', precision=0, value=1)
+                        sd_batch_count = gr.Number(label='Batch count', precision=0, value=1)
+                        sd_batch_size = gr.Number(label='Images per batch', precision=0, value=1)
 
                     with gr.Group():
-                        sd_input_image = \
-                            gr.Image(label='Input Image', source="upload", interactive=True, type="pil", show_label=True, visible=False)
-                        sd_resize_mode = \
-                            gr.Dropdown(label="Resize mode", choices=["Stretch", "Scale and crop", "Scale and fill"], type="index", value="Stretch", visible=False)
+                        sd_input_image = gr.Image(label='Input Image', source="upload", interactive=True, type="pil", show_label=True, visible=False)
+                        sd_resize_mode = gr.Dropdown(label="Resize mode", choices=["Stretch", "Scale and crop", "Scale and fill"], type="index", value="Stretch", visible=False)
+
+                        sd_inpainting_mask_blur = gr.Slider(label='Inpainting: mask blur', minimum=0, maximum=64, step=1, value=4, visible=False)
+                        sd_inpainting_mask_content = gr.Radio(label='Inpainting: masked content', choices=['fill', 'original', 'latent noise', 'latent nothing'], value='fill', type="index", visible=False)
+
+                    with gr.Group():
+                        sd_custom_code = gr.Textbox(label="Python script", visible=cmd_opts.allow_code, lines=1)
 
                 # Center Column
                 with gr.Column():
-                    sd_output_image = \
-                        gr.Gallery(show_label=False, elem_id='output_gallery').style(grid=3)
-                    sd_output_html = \
-                        gr.HTML()
+                    sd_output_image = gr.Gallery(show_label=False, elem_id='output_gallery').style(grid=3)
+                    sd_inpainting_image = gr.Image(label='Inpainting image', source="upload", interactive=True, type="pil", tool="sketch", visible=False)
+                    sd_output_html = gr.HTML()
 
                 # Right Column
                 with gr.Column():
-                    with gr.Row():
-                        sd_sampling_method = \
-                            gr.Dropdown(label='Sampling method', choices=[x.name for x in samplers], value=samplers[0].name, type="index")
-                        sd_sampling_steps = \
-                            gr.Slider(label="Sampling steps", value=30, minimum=5, maximum=100, step=5)
+                    with gr.Group():
+                        sd_sampling_method = gr.Dropdown(label='Sampling method', choices=[x.name for x in samplers], value=samplers[0].name, type="index")
+                        sd_sampling_steps = gr.Slider(label="Sampling steps", value=18, minimum=1, maximum=100, step=1)
 
                     with gr.Group():
-                        sd_cfg = \
-                            gr.Slider(label='Prompt similarity (CFG)', value=8.0, minimum=1.0, maximum=15.0, step=0.5)
-                        sd_denoise = \
-                            gr.Slider(label='Denoising strength (DNS)', value=0.75, minimum=0.0, maximum=1.0, step=0.01, visible=False)
+                        sd_cfg = gr.Slider(label='Prompt similarity (CFG)', value=8.0, minimum=1.0, maximum=15.0, step=0.5)
+                        sd_denoise = gr.Slider(label='Denoising strength (DNS)', value=0.75, minimum=0.0, maximum=1.0, step=0.01, visible=False)
 
-                    sd_facefix = \
-                        gr.Checkbox(label='GFPGAN', value=False, visible=GFPGAN is not None)
-                    sd_facefix_strength = \
-                        gr.Slider(minimum=0.0, maximum=1.0, step=0.1, label="Strength", value=1, interactive=GFPGAN is not None, visible=False)
+                    sd_input_seed = gr.Number(label="Seed", value=-1, precision=0)
 
-                    sd_use_input_seed = \
-                        gr.Checkbox(label='Custom seed')
-                    sd_input_seed = \
-                        gr.Number(value=-1, visible=False, show_label=False)
+                    sd_facefix = gr.Checkbox(label='GFPGAN', value=False, visible=have_gfpgan)
+                    sd_facefix_strength = gr.Slider(minimum=0.0, maximum=1.0, step=0.1, label="Strength", value=1, interactive=have_gfpgan, visible=False)
 
                     # TODO: Change to 'Enable syntactic prompts'
-                    sd_matrix = \
-                        gr.Checkbox(label='Create prompt matrix', value=False)
-
-                    sd_loopback = \
-                        gr.Checkbox(label='Output loopback', value=False, visible=False)
-                    sd_upscale = \
-                        gr.Checkbox(label='Super resolution upscale', value=False, visible=False)
+                    sd_matrix = gr.Checkbox(label='Create prompt matrix', value=False)
+                    sd_loopback = gr.Checkbox(label='Output loopback', value=False, visible=False)
+                    sd_upscale = gr.Checkbox(label='Stable diffusion upscale', value=False, visible=False)
 
             with gr.Row():
-                sd_mode = \
-                    gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Post-Processing'], elem_id='sd_mode')
-                sd_generate = \
-                    gr.Button('Generate', variant='primary', elem_id='sd_generate').style(full_width=False)
+                sd_mode = gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Post-Processing', 'Inpainting'], elem_id='sd_mode')
+                sd_generate = gr.Button('Generate', variant='primary', elem_id='sd_generate').style(full_width=False)
 
         with gr.TabItem('Settings', id='settings_tab'):
             # TODO: Add HTML output to indicate settings saved
             sd_settings = [create_setting_component(key) for key in opts.data_labels.keys()]
             with gr.Row():
-                sd_confirm_settings = \
-                    gr.HTML(elem_id='sd_settings_html')
-                sd_save_settings = \
-                    gr.Button('Save', variant='primary', elem_id='sd_save_settings').style(full_width=False)
+                sd_confirm_settings = gr.HTML(elem_id='sd_settings_html')
+                sd_save_settings = gr.Button('Save', variant='primary', elem_id='sd_save_settings').style(full_width=False)
 
-    def mode_change(mode: str, facefix: bool, custom_seed: bool):
+
+    def mode_change(mode: str, facefix: bool):
         is_img2img = (mode == 'Image-to-Image')
         is_txt2img = (mode == 'Text-to-Image')
+        is_inpainting = (mode == 'Inpainting')
         is_pp = (mode == 'Post-Processing')
 
         return {
-            sd_cfg: gr.update(visible=is_img2img or is_txt2img),
-            sd_denoise: gr.update(visible=is_img2img),
-            sd_sampling_method: gr.update(visible=is_img2img or is_txt2img),
-            sd_sampling_steps: gr.update(visible=is_img2img or is_txt2img),
-            sd_batch_count: gr.update(visible=is_img2img or is_txt2img),
-            sd_batch_size: gr.update(visible=is_img2img or is_txt2img),
+            sd_cfg: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
+            sd_denoise: gr.update(visible=is_img2img or is_inpainting),
+            sd_sampling_method: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
+            sd_sampling_steps: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
+            sd_batch_count: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
+            sd_batch_size: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_input_image: gr.update(visible=is_img2img or is_pp),
-            sd_resize_mode: gr.update(visible=is_img2img),
-            sd_image_height: gr.update(visible=is_img2img or is_txt2img),
-            sd_image_width: gr.update(visible=is_img2img or is_txt2img),
-            sd_use_input_seed: gr.update(visible=is_img2img or is_txt2img),
-            # TODO: can we handle this by updating use_input_seed and having its callback handle it?
-            sd_input_seed: gr.update(visible=(is_img2img or is_txt2img) and custom_seed),
+            sd_resize_mode: gr.update(visible=is_img2img or is_inpainting),
+            sd_image_height: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
+            sd_image_width: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
+            sd_custom_code: gr.update(visible=is_txt2img and cmd_opts.allow_code),
+            sd_input_seed: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_facefix: gr.update(visible=True),
             # TODO: see above, but for facefix
             sd_facefix_strength: gr.update(visible=facefix),
             sd_matrix: gr.update(visible=is_img2img or is_txt2img),
             sd_loopback: gr.update(visible=is_img2img),
-            sd_upscale: gr.update(visible=is_img2img)
+            sd_upscale: gr.update(visible=is_img2img),
+            sd_inpainting_mask_blur: gr.update(visible=is_inpainting),
+            sd_inpainting_mask_content: gr.update(visible=is_inpainting),
+            sd_inpainting_image: gr.update(visible=is_inpainting),
+
         }
+
 
     sd_mode.change(
         fn=mode_change,
         inputs=[
             sd_mode,
-            sd_facefix,
-            sd_use_input_seed
+            sd_facefix
         ],
         outputs=[
             sd_cfg,
@@ -1485,13 +1764,16 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_resize_mode,
             sd_image_height,
             sd_image_width,
-            sd_use_input_seed,
+            sd_custom_code,
             sd_input_seed,
             sd_facefix,
             sd_facefix_strength,
             sd_matrix,
             sd_loopback,
-            sd_upscale
+            sd_upscale,
+            sd_inpainting_mask_blur,
+            sd_inpainting_mask_content,
+            sd_inpainting_image,
         ]
     )
 
@@ -1510,13 +1792,16 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_resize_mode,
             sd_image_height,
             sd_image_width,
-            sd_use_input_seed,
+            sd_custom_code,
             sd_input_seed,
             sd_facefix,
             sd_facefix_strength,
             sd_matrix,
             sd_loopback,
-            sd_upscale
+            sd_upscale,
+            sd_inpainting_mask_blur,
+            sd_inpainting_mask_content,
+            sd_inpainting_image,
         ],
         outputs=[
             sd_output_image,
@@ -1527,38 +1812,20 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
     sd_prompt.submit(**do_generate_args)
     sd_generate.click(**do_generate_args)
 
-    sd_use_input_seed.change(
-        lambda checked : gr.update(visible=checked),
-        inputs=sd_use_input_seed,
-        outputs=sd_input_seed
-    )
-
-    sd_image_height.submit(
-        lambda value : 64 * ((value + 63) // 64) if value > 0 else 512,
-        inputs=sd_image_height,
-        outputs=sd_image_height
-    )
-
-    sd_image_width.submit(
-        lambda value : 64 * ((value + 63) // 64) if value > 0 else 512,
-        inputs=sd_image_width,
-        outputs=sd_image_width
-    )
-
     sd_batch_count.submit(
-        lambda value : value if value > 0 else 1,
+        lambda value: value if value > 0 else 1,
         inputs=sd_batch_count,
         outputs=sd_batch_count
     )
 
     sd_batch_size.submit(
-        lambda value : value if value > 0 else 1,
+        lambda value: value if value > 0 else 1,
         inputs=sd_batch_size,
         outputs=sd_batch_size
     )
 
     sd_facefix.change(
-        lambda checked : gr.update(visible=checked),
+        lambda checked: gr.update(visible=checked),
         inputs=sd_facefix,
         outputs=sd_facefix_strength
     )
@@ -1569,4 +1836,5 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
         outputs=sd_confirm_settings
     )
 
+demo.queue(concurrency_count=1)
 demo.launch()
