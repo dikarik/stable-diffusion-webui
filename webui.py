@@ -1612,9 +1612,10 @@ custom_css = \
         font-size: 1rem;
         appearance: none;
         -webkit-appearance: none;
-        background-position: left;
+        background-position: right;
         background-size: contain;
         padding-right: 0;
+        padding-left: 0;
         border-color: rgb(75 85 99 / var(--tw-border-opacity));
         width: 15rem;
         float: right;
@@ -1671,8 +1672,8 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                         sd_input_image = gr.Image(label='Input Image', source="upload", interactive=True, type="pil", show_label=True, visible=False)
                         sd_resize_mode = gr.Dropdown(label="Resize mode", choices=["Stretch", "Scale and crop", "Scale and fill"], type="index", value="Stretch", visible=False)
 
-                        sd_inpainting_mask_blur = gr.Slider(label='Inpainting: mask blur', minimum=0, maximum=64, step=1, value=4, visible=False)
-                        sd_inpainting_mask_content = gr.Radio(label='Inpainting: masked content', choices=['fill', 'original', 'latent noise', 'latent nothing'], value='fill', type="index", visible=False)
+                        sd_inpainting_mask_blur = gr.Slider(label='Mask blur', minimum=0, maximum=64, step=1, value=4, visible=False)
+                        sd_inpainting_mask_content = gr.Radio(label='Masked content', choices=['Fill', 'Original', 'Latent noise', 'Latent nothing'], value='Fill', type="index", visible=False)
 
                     with gr.Group():
                         sd_custom_code = gr.Textbox(label="Python script", visible=cmd_opts.allow_code, lines=1)
@@ -1692,16 +1693,15 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                     with gr.Group():
                         sd_cfg = gr.Slider(label='Prompt similarity (CFG)', value=8.0, minimum=1.0, maximum=15.0, step=0.5)
                         sd_denoise = gr.Slider(label='Denoising strength (DNS)', value=0.75, minimum=0.0, maximum=1.0, step=0.01, visible=False)
+                        sd_input_seed = gr.Number(label="Seed", value=-1, precision=0)
 
-                    sd_input_seed = gr.Number(label="Seed", value=-1, precision=0)
-
-                    sd_facefix = gr.Checkbox(label='GFPGAN', value=False, visible=have_gfpgan)
-                    sd_facefix_strength = gr.Slider(minimum=0.0, maximum=1.0, step=0.1, label="Strength", value=1, interactive=have_gfpgan, visible=False)
-
-                    # TODO: Change to 'Enable syntactic prompts'
-                    sd_matrix = gr.Checkbox(label='Create prompt matrix', value=False)
-                    sd_loopback = gr.Checkbox(label='Output loopback', value=False, visible=False)
-                    sd_upscale = gr.Checkbox(label='Stable diffusion upscale', value=False, visible=False)
+                    with gr.Group():
+                        sd_facefix = gr.Checkbox(label='GFPGAN', value=False, visible=have_gfpgan)
+                        sd_facefix_strength = gr.Slider(minimum=0.0, maximum=1.0, step=0.1, label="Strength", value=1, interactive=have_gfpgan, visible=False)
+                        # TODO: Change to 'Enable syntactic prompts' once prompt sets are added, then we can do matrix/combos in a single syntax
+                        sd_matrix = gr.Checkbox(label='Create prompt matrix', value=False)
+                        sd_loopback = gr.Checkbox(label='Output loopback', value=False, visible=False)
+                        sd_upscale = gr.Checkbox(label='Stable diffusion upscale', value=False, visible=False)
 
             with gr.Row():
                 sd_mode = gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Post-Processing', 'Inpainting'], elem_id='sd_mode')
