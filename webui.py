@@ -20,6 +20,7 @@ import time
 import json
 import traceback
 from datetime import datetime
+from enum import IntEnum
 
 import k_diffusion.sampling
 from ldm.util import instantiate_from_config
@@ -1230,14 +1231,19 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
         return samples_ddim
 
+class Img2Img_Modes(IntEnum):
+    CLASSIC = 0
+    INPAINT = 1
+    LOOPBACK = 2
+    UPSCALE = 3
 
 def img2img(prompt: str, init_img, init_img_with_mask, steps: int, sampler_index: int, mask_blur: int, inpainting_fill: int, use_GFPGAN: bool, strength_GFPGAN: float, prompt_matrix, mode: int, n_iter: int, batch_size: int, cfg_scale: float, denoising_strength: float, seed: int, height: int, width: int, resize_mode: int):
     outpath = opts.outdir or "outputs/img2img-samples"
 
-    is_classic = mode == 0
-    is_inpaint = mode == 1
-    is_loopback = mode == 2
-    is_upscale = mode == 3
+    is_classic = mode == Img2Img_Modes.CLASSIC
+    is_inpaint = mode == Img2Img_Modes.INPAINT
+    is_loopback = mode == Img2Img_Modes.LOOPBACK
+    is_upscale = mode == Img2Img_Modes.UPSCALE
 
     if is_inpaint:
         image = init_img_with_mask['image']
@@ -1532,19 +1538,29 @@ def do_generate(
 
         )
     elif mode == 'Image-to-Image' or mode == 'Inpainting':
+        # TODO: turn this into a dropdown/radio buttons
+        if mode == 'Image-to-Image':
+            if upscale:
+                img2img_mode = Img2Img_Modes.UPSCALE
+            elif loopback:
+                img2img_mode = Img2Img_Modes.LOOPBACK
+            else:
+                img2img_mode = Img2Img_Modes.CLASSIC
+        elif mode == 'Inpainting':
+            img2img_mode = Img2Img_Modes.INPAINT
+
         return img2img(
             prompt=prompt,
             init_img=input_img,
             init_img_with_mask=inpainting_image,
-            ddim_steps=sampler_steps,
+            steps=sampler_steps,
             sampler_index=sampler_index,
             mask_blur=inpainting_mask_blur,
             inpainting_fill=inpainting_mask_content,
             use_GFPGAN=facefix,
             strength_GFPGAN=facefix_strength,
             prompt_matrix=prompt_matrix,
-            loopback=loopback,
-            sd_upscale=upscale,
+            mode=img2img_mode,
             n_iter=batch_count,
             batch_size=batch_size,
             cfg_scale=cfg,
