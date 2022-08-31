@@ -1,5 +1,25 @@
 .wrap .m-12 svg { display:none!important; }
-.wrap .m-12::before { content:"Loading..." }
+
+/*
+Looping fade in/out, seems to impact GPU render speed sadly
+
+@keyframes fadeIn { 
+    from { opacity: 0; } 
+}
+
+.wrap .m-12::before {
+    content:"Loading...";
+    opacity: 1;
+    animation: fadeIn 1s infinite alternate;
+}
+*/
+
+.wrap .m-12::before {
+    content:"Loading...";
+    opacity: 1;
+    font-weight: bold;
+}
+
 .progress-bar { display:none!important; }
 .meta-text { display:none!important; }
 .output-html p { margin: 0 0.5em; }
@@ -16,6 +36,10 @@
     padding-top: 0.5rem;
     padding-right: 0.5rem;
     padding-left: 0.5rem;
+}
+
+#output_gallery > div > button.gallery-item {
+    background-color: transparent !important;
 }
 
 /* remove excess padding around prompt textbox, increase font size */

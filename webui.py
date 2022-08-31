@@ -1519,6 +1519,8 @@ def do_generate(
             raise Exception("Batch count must be > 0")
         elif batch_size <= 0:
             raise Exception("Images per batch must be > 0")
+        elif image_height % 64 != 0 or image_width % 64 != 0:
+            raise Exception("Image dimensions must both be multiples of 64")
 
     if mode == 'Text-to-Image':
         return txt2img(
@@ -1599,8 +1601,8 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
                 # Left Column
                 with gr.Column():
                     with gr.Row():
-                        sd_image_height = gr.Number(label="Height", elem_id='img_height', value=512, precision=0)
                         sd_image_width = gr.Number(label="Width", elem_id='img_width', value=512, precision=0)
+                        sd_image_height = gr.Number(label="Height", elem_id='img_height', value=512, precision=0)
 
                     with gr.Row():
                         sd_batch_count = gr.Number(label='Batch count', precision=0, value=1)
@@ -1810,5 +1812,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
         outputs=sd_input_seed
     )
 
-demo.queue(concurrency_count=1)
+# TODO: make this an option?
+# NOTE: this suppresses the useful error outputs in the UI
+#demo.queue(concurrency_count=1)
 demo.launch()
