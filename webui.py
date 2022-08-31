@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import gradio as gr
+import gradio.utils
 from omegaconf import OmegaConf
 from PIL import Image, ImageFont, ImageDraw, PngImagePlugin, ImageFilter, ImageOps
 from torch import autocast
@@ -25,6 +26,10 @@ from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 
+# fix gradio phoning home
+gradio.utils.version_check = lambda: None
+gradio.utils.get_local_ip_address = lambda: '127.0.0.1'
+
 try:
     # this silences the annoying "Some weights of the model checkpoint were not used when initializing..." message at start.
 
@@ -37,6 +42,8 @@ except Exception:
 # this is a fix for Windows users. Without it, javascript files will be served with text/html content-type and the bowser will not show any UI
 mimetypes.init()
 mimetypes.add_type('application/javascript', '.js')
+
+script_path = os.path.dirname(os.path.realpath(__file__))
 
 # some of those options should not be changed at all because they would break the model, so I removed them from options.
 opt_C = 4
@@ -71,8 +78,8 @@ samplers = [
         ('Euler ancestral', 'sample_euler_ancestral'),
         ('LMS', 'sample_lms'),
         ('Heun', 'sample_heun'),
-        ('DPM 2', 'sample_dpm_2'),
-        ('DPM 2 Ancestral', 'sample_dpm_2_ancestral'),
+        ('DPM2', 'sample_dpm_2'),
+        ('DPM2 a', 'sample_dpm_2_ancestral'),
     ] if hasattr(k_diffusion.sampling, x[1])],
     SamplerData('DDIM', lambda: VanillaStableDiffusionSampler(DDIMSampler)),
     SamplerData('PLMS', lambda: VanillaStableDiffusionSampler(PLMSSampler)),
@@ -1103,6 +1110,10 @@ class Flagging(gr.FlaggingCallback):
 
         print("Logged:", filenames[0])
 
+with gr.Blocks(analytics_enabled=False) as txt2img_interface:
+    with gr.Row():
+        prompt = gr.Textbox(label="Prompt", elem_id="txt2img_prompt", show_label=False, placeholder="Prompt", lines=1)
+        submit = gr.Button('Generate', variant='primary')
 
 def fill(image, mask):
     image_mod = Image.new('RGBA', (image.width, image.height))
@@ -1220,10 +1231,15 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         return samples_ddim
 
 
-def img2img(prompt: str, init_img, init_img_with_mask, ddim_steps: int, sampler_index: int, mask_blur: int, inpainting_fill: int, use_GFPGAN: bool, strength_GFPGAN: float, prompt_matrix, loopback: bool, sd_upscale: bool, n_iter: int, batch_size: int, cfg_scale: float, denoising_strength: float, seed: int, height: int, width: int, resize_mode: int):
+def img2img(prompt: str, init_img, init_img_with_mask, steps: int, sampler_index: int, mask_blur: int, inpainting_fill: int, use_GFPGAN: bool, strength_GFPGAN: float, prompt_matrix, mode: int, n_iter: int, batch_size: int, cfg_scale: float, denoising_strength: float, seed: int, height: int, width: int, resize_mode: int):
     outpath = opts.outdir or "outputs/img2img-samples"
 
-    if init_img_with_mask is not None:
+    is_classic = mode == 0
+    is_inpaint = mode == 1
+    is_loopback = mode == 2
+    is_upscale = mode == 3
+
+    if is_inpaint:
         image = init_img_with_mask['image']
         mask = init_img_with_mask['mask']
     else:
@@ -1239,7 +1255,7 @@ def img2img(prompt: str, init_img, init_img_with_mask, ddim_steps: int, sampler_
         sampler_index=sampler_index,
         batch_size=batch_size,
         n_iter=n_iter,
-        steps=ddim_steps,
+        steps=steps,
         cfg_scale=cfg_scale,
         width=width,
         height=height,
@@ -1255,7 +1271,7 @@ def img2img(prompt: str, init_img, init_img_with_mask, ddim_steps: int, sampler_
         extra_generation_params={"DNS": denoising_strength}
     )
 
-    if loopback:
+    if is_loopback:
         output_images, info = None, None
         history = []
         initial_seed = None
@@ -1284,7 +1300,7 @@ def img2img(prompt: str, init_img, init_img_with_mask, ddim_steps: int, sampler_
 
         processed = Processed(history, initial_seed, initial_info)
 
-    elif sd_upscale:
+    elif is_upscale:
         initial_seed = None
         initial_info = None
 
@@ -1414,6 +1430,7 @@ pnginfo_interface = gr.Interface(
         gr.HTML(),
     ],
     allow_flagging="never",
+    analytics_enabled=False,
 )
 
 opts = Options()
