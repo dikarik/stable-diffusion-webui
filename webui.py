@@ -1495,6 +1495,7 @@ def do_generate(
         inpainting_mask_blur,
         inpainting_mask_content,
         inpainting_image,
+        use_input_seed: bool
 ):
 
     if mode == 'Text-to-Image' or mode == 'Image-to-Image':
@@ -1514,7 +1515,7 @@ def do_generate(
             n_iter=batch_count,
             batch_size=batch_size,
             cfg_scale=cfg,
-            seed=input_seed,
+            seed=input_seed if use_input_seed else -1,
             height=image_height,
             width=image_width,
             code=custom_code,
@@ -1538,7 +1539,7 @@ def do_generate(
             batch_size=batch_size,
             cfg_scale=cfg,
             denoising_strength=denoise,
-            seed=input_seed,
+            seed=input_seed if use_input_seed else -1,
             height=image_height,
             width=image_width,
             resize_mode=resize_mode,
@@ -1650,14 +1651,14 @@ custom_css = \
         margin-left: auto;
     }
 
-    /* increase inpainting size */
-    #sd_inpaint {
+    /* increase image size */
+    #sd_inpaint_img, #sd_input_img {
         aspect-ratio: 1;
         width: 100%;
         height: 100%;
     }
 
-    #sd_inpaint > div[data-testid="image"] {
+    #sd_inpaint_img > div[data-testid="image"], #sd_input_img > div[data-testid="image"] {
         max-width: 100%;
         max-height: 100%;
         height: 100%;
@@ -1667,13 +1668,26 @@ custom_css = \
         position: absolute;
     }
 
-    /* pretty sure we don't want this, does weird things to the canvas
-       the canvas/masking feature seems buggy even normally, require two reloads of the image to work correctly
-    #sd_inpaint > div[data-testid="image"] > div > canvas {
-        height: 100% !important;
-        width: 100% !important;
+    /* fix group borders for split mask controls */
+    #sd_inpainting_mask_content {
+        border-top-left-radius: 0;
+        border-top: none;
     }
-    */
+    #sd_inpainting_mask_blur {
+        border-top: none;
+        border-top-right-radius: 0;
+    }
+
+    /* Hide number arrows */
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+    }
+
+    input[type=number] {
+        -moz-appearance:textfield; /* Firefox */
+    }
     """
 
 full_css = main_css + css_hide_progressbar + custom_css
@@ -1687,23 +1701,23 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             with gr.Row(elem_id='body').style(equal_height=False):
                 # Left Column
                 with gr.Column():
-                    sd_image_height = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", elem_id='img_height', value=512)
-
-                    sd_image_width = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", elem_id='img_width', value=512)
+                    with gr.Row():
+                        sd_image_height = gr.Number(label="Height", elem_id='img_height', value=512, precision=0)
+                        sd_image_width = gr.Number(label="Width", elem_id='img_width', value=512, precision=0)
 
                     with gr.Row():
                         sd_batch_count = gr.Number(label='Batch count', precision=0, value=1)
                         sd_batch_size = gr.Number(label='Images per batch', precision=0, value=1)
 
                     with gr.Group():
-                        # TODO: hide label when image is loaded?
-                        # TODO: use the same input image element but change the style from crop to sketch dynamically on mode change?
-                        sd_inpainting_image = gr.Image(label='Input Image', show_label=False, source="upload", interactive=True, type="pil", tool="sketch", visible=False, elem_id='sd_inpaint')
-                        sd_input_image = gr.Image(label='Input Image', source="upload", interactive=True, type="pil", show_label=True, visible=False)
+                        sd_inpainting_image = gr.Image(show_label=False, source="upload", interactive=True, type="pil", tool="sketch", visible=False, elem_id='sd_inpaint_img')
+                        sd_input_image = gr.Image(show_label=False, source="upload", interactive=True, type="pil", visible=False, elem_id='sd_input_img')
+
                         sd_resize_mode = gr.Dropdown(label="Resize mode", choices=["Stretch", "Scale and crop", "Scale and fill"], type="index", value="Stretch", visible=False)
 
-                        sd_inpainting_mask_blur = gr.Slider(label='Mask blur', minimum=0, maximum=64, step=1, value=4, visible=False)
-                        sd_inpainting_mask_content = gr.Radio(label='Masked content', choices=['Fill', 'Original', 'Latent noise', 'Latent nothing'], value='Fill', type="index", visible=False)
+                        with gr.Row():
+                            sd_inpainting_mask_content = gr.Dropdown(label='Masked content', choices=['Fill', 'Original', 'Latent noise', 'Latent nothing'], value='Fill', type="index", visible=False, elem_id='sd_inpainting_mask_content')
+                            sd_inpainting_mask_blur = gr.Slider(label='Mask blur', minimum=0, maximum=64, step=1, value=4, visible=False, elem_id='sd_inpainting_mask_blur')
 
                     # TODO: move this under the main buttons somewhere (either inside/outside TabUI)
                     with gr.Group():
@@ -1723,18 +1737,19 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                     with gr.Group():
                         sd_cfg = gr.Slider(label='Prompt similarity (CFG)', value=8.0, minimum=1.0, maximum=15.0, step=0.5)
                         sd_denoise = gr.Slider(label='Denoising strength (DNS)', value=0.75, minimum=0.0, maximum=1.0, step=0.01, visible=False)
-                        sd_input_seed = gr.Number(label="Seed", value=-1, precision=0)
 
                     with gr.Group():
                         sd_facefix = gr.Checkbox(label='GFPGAN', value=False, visible=have_gfpgan)
                         sd_facefix_strength = gr.Slider(minimum=0.0, maximum=1.0, step=0.1, label="Strength", value=1, interactive=have_gfpgan, visible=False)
+                        sd_use_input_seed = gr.Checkbox(label='Custom seed')
+                        sd_input_seed = gr.Number(show_label=False, value=-1, precision=0, visible=False)
                         # TODO: Change to 'Enable syntactic prompts' once prompt sets are added, then we can do matrix/combos in a single syntax
                         sd_matrix = gr.Checkbox(label='Create prompt matrix', value=False)
                         sd_loopback = gr.Checkbox(label='Output loopback', value=False, visible=False)
                         sd_upscale = gr.Checkbox(label='Stable diffusion upscale', value=False, visible=False)
 
             with gr.Row():
-                sd_mode = gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Post-Processing', 'Inpainting'], elem_id='sd_mode')
+                sd_mode = gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Inpainting'], elem_id='sd_mode')
                 sd_generate = gr.Button('Generate', variant='primary', elem_id='sd_generate').style(full_width=False)
 
         with gr.TabItem('Settings', id='settings_tab'):
@@ -1745,7 +1760,7 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                 sd_save_settings = gr.Button('Save', variant='primary', elem_id='sd_save_settings').style(full_width=False)
 
 
-    def mode_change(mode: str, facefix: bool):
+    def mode_change(mode: str, facefix: bool, use_input_seed: bool):
         is_img2img = (mode == 'Image-to-Image')
         is_txt2img = (mode == 'Text-to-Image')
         is_inpainting = (mode == 'Inpainting')
@@ -1758,12 +1773,11 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_sampling_steps: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_batch_count: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_batch_size: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
-            sd_input_image: gr.update(visible=is_img2img or is_pp),
             sd_resize_mode: gr.update(visible=is_img2img or is_inpainting),
             sd_image_height: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_image_width: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_custom_code: gr.update(visible=is_txt2img and cmd_opts.allow_code),
-            sd_input_seed: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
+            sd_input_seed: gr.update(visible=not is_pp and use_input_seed),
             sd_facefix: gr.update(visible=True),
             # TODO: see above, but for facefix
             sd_facefix_strength: gr.update(visible=facefix),
@@ -1772,16 +1786,17 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_upscale: gr.update(visible=is_img2img),
             sd_inpainting_mask_blur: gr.update(visible=is_inpainting),
             sd_inpainting_mask_content: gr.update(visible=is_inpainting),
+            sd_input_image: gr.update(visible=is_img2img or is_pp,),
             sd_inpainting_image: gr.update(visible=is_inpainting),
-
+            sd_use_input_seed: gr.update(visible=not is_pp)
         }
-
 
     sd_mode.change(
         fn=mode_change,
         inputs=[
             sd_mode,
-            sd_facefix
+            sd_facefix,
+            sd_use_input_seed
         ],
         outputs=[
             sd_cfg,
@@ -1804,6 +1819,7 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_inpainting_mask_blur,
             sd_inpainting_mask_content,
             sd_inpainting_image,
+            sd_use_input_seed
         ]
     )
 
@@ -1832,6 +1848,7 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_inpainting_mask_blur,
             sd_inpainting_mask_content,
             sd_inpainting_image,
+            sd_use_input_seed
         ],
         outputs=[
             sd_output_image,
@@ -1864,6 +1881,24 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
         fn=run_settings,
         inputs=sd_settings,
         outputs=sd_confirm_settings
+    )
+
+    sd_image_height.submit(
+        lambda value : 64 * ((value + 63) // 64),
+        inputs=sd_image_height,
+        outputs=sd_image_height
+    )
+
+    sd_image_width.submit(
+        lambda value : 64 * ((value + 63) // 64),
+        inputs=sd_image_width,
+        outputs=sd_image_width
+    )
+
+    sd_use_input_seed.change(
+        lambda checked: gr.update(visible=checked),
+        inputs=sd_use_input_seed,
+        outputs=sd_input_seed
     )
 
 demo.queue(concurrency_count=1)
