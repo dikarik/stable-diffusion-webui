@@ -64,13 +64,6 @@ cpu = torch.device("cpu")
 gpu = torch.device("cuda")
 device = gpu if torch.cuda.is_available() else cpu
 
-css_hide_progressbar = """
-.wrap .m-12 svg { display:none!important; }
-.wrap .m-12::before { content:"Loading..." }
-.progress-bar { display:none!important; }
-.meta-text { display:none!important; }
-"""
-
 SamplerData = namedtuple('SamplerData', ['name', 'constructor'])
 samplers = [
     *[SamplerData(x[0], lambda funcname=x[1]: KDiffusionSampler(funcname)) for x in [
@@ -1544,155 +1537,24 @@ def do_generate(
             width=image_width,
             resize_mode=resize_mode,
         )
-    elif mode == 'Post-Processing':
-        return run_extras(
-            image=input_img,
-            GFPGAN_strength=facefix_strength,
-            RealESRGAN_upscaling=1.0,
-            RealESRGAN_model_index=0
-        )
 
     raise Exception('Invalid mode selected')
 
-# TODO: move all of the CSS to a separate file (webui.css)
-# TODO: let the user supply a CSS file (userstyle.css)
 
-css_hide_progressbar = \
-    """
-    .wrap .m-12 svg { display:none!important; }
-    .wrap .m-12::before { content:"Loading..." }
-    .progress-bar { display:none!important; }
-    .meta-text { display:none!important; }
-    """
 
-main_css = \
-    """
-    .output-html p { margin: 0 0.5em; }
-    .performance, .params-info, .comments-info { font-size: 0.85em; color: #666; }
-    """
+# TODO: separate frontend (UI, handlers, wrappers, etc) and backend (ML, image processing, etc) code into separate files
+'''
+--- UI CODE ---
+'''
 
-# [data-testid="image"] {min-height: 512px !important}
-# #generate{width: 100%;}
-custom_css = \
-    """
-    /* hide scrollbars, better scaling for gallery, small padding for main image */
-    ::-webkit-scrollbar { display: none }
-    #output_gallery {
-        min-height: 50vh !important;
-        scrollbar-width: none;
-    }
-    
-    #output_gallery > div > img {
-        padding-top: 0.5rem;
-        padding-right: 0.5rem;
-        padding-left: 0.5rem;
-    }
-    
-    /* remove excess padding around prompt textbox, increase font size */
-    #prompt_row input { font-size: 16px }
-    #prompt_input {
-        padding-top: 0.25rem !important;
-        padding-bottom: 0rem !important;
-        padding-left: 0rem !important;
-        padding-right: 0rem !important;
-        border-style: none !important;
-    }
-    
-    /* remove excess padding from mode dropdown, change appear to a button */
-    #sd_mode {
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-        border-style: none !important;
-    }
-    
-    #sd_mode > label > select {
-        font-weight: 600;
-        min-height: 42px;
-        max-height: 42px;
-        text-align: center;
-        font-size: 1rem;
-        appearance: none;
-        -webkit-appearance: none;
-        background-position: right;
-        background-size: contain;
-        padding-right: 0;
-        padding-left: 0;
-        border-color: rgb(75 85 99 / var(--tw-border-opacity));
-        width: 15rem;
-        float: right;
-    }
-    
-    /* custom column scaling (odd = right/left, even = center) */
-    #body>.col:nth-child(odd) {
-        max-width: 450px;
-        min-width: 300px;
-    }
-    #body>.col:nth-child(even) {
-        width:250%;
-    }
-    
-    /* better overall scaling + limits */
-    .container {
-        max-width: min(1600px, 95%);
-    }
+webui_css = open('webui.css', 'r').read()
 
-    /* generate button size */
-    #sd_generate {
-        width: 15rem;
-        flex: none;
-    }
+if os.path.isfile('userstyle.css'):
+    userstyle_css = open('userstyle.css', 'r').read()
+else:
+    userstyle_css = ''
 
-    /* save button */
-    #sd_save_settings {
-        width: 15rem;
-        flex: none;
-        margin-left: auto;
-    }
-
-    /* increase image size */
-    #sd_inpaint_img, #sd_input_img {
-        aspect-ratio: 1;
-        width: 100%;
-        height: 100%;
-    }
-
-    #sd_inpaint_img > div[data-testid="image"], #sd_input_img > div[data-testid="image"] {
-        max-width: 100%;
-        max-height: 100%;
-        height: 100%;
-        width: 100%;
-        top: 0;
-        left: 0;
-        position: absolute;
-    }
-
-    /* fix group borders for split mask controls */
-    #sd_inpainting_mask_content {
-        border-top-left-radius: 0;
-        border-top: none;
-    }
-    #sd_inpainting_mask_blur {
-        border-top: none;
-        border-top-right-radius: 0;
-    }
-
-    /* Hide number arrows */
-    input::-webkit-outer-spin-button,
-    input::-webkit-inner-spin-button {
-        -webkit-appearance: none;
-        margin: 0;
-    }
-
-    input[type=number] {
-        -moz-appearance:textfield; /* Firefox */
-    }
-    """
-
-full_css = main_css + css_hide_progressbar + custom_css
-
-with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion WebUI') as demo:
+with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='Stable Diffusion WebUI') as demo:
     with gr.Tabs(elem_id='tabs'):
         with gr.TabItem('Stable Diffusion', id='sd_tab'):
             with gr.Row(elem_id='prompt_row'):
@@ -1719,10 +1581,6 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                             sd_inpainting_mask_content = gr.Dropdown(label='Masked content', choices=['Fill', 'Original', 'Latent noise', 'Latent nothing'], value='Fill', type="index", visible=False, elem_id='sd_inpainting_mask_content')
                             sd_inpainting_mask_blur = gr.Slider(label='Mask blur', minimum=0, maximum=64, step=1, value=4, visible=False, elem_id='sd_inpainting_mask_blur')
 
-                    # TODO: move this under the main buttons somewhere (either inside/outside TabUI)
-                    with gr.Group():
-                        sd_custom_code = gr.Textbox(label="Python script", visible=cmd_opts.allow_code, lines=1)
-
                 # Center Column
                 with gr.Column():
                     sd_output_image = gr.Gallery(show_label=False, elem_id='output_gallery').style(grid=3)
@@ -1743,17 +1601,19 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
                         sd_facefix_strength = gr.Slider(minimum=0.0, maximum=1.0, step=0.1, label="Strength", value=1, interactive=have_gfpgan, visible=False)
                         sd_use_input_seed = gr.Checkbox(label='Custom seed')
                         sd_input_seed = gr.Number(show_label=False, value=-1, precision=0, visible=False)
-                        # TODO: Change to 'Enable syntactic prompts' once prompt sets are added, then we can do matrix/combos in a single syntax
                         sd_matrix = gr.Checkbox(label='Create prompt matrix', value=False)
                         sd_loopback = gr.Checkbox(label='Output loopback', value=False, visible=False)
                         sd_upscale = gr.Checkbox(label='Stable diffusion upscale', value=False, visible=False)
 
-            with gr.Row():
+            with gr.Row(elem_id='row_buttons'):
                 sd_mode = gr.Dropdown(show_label=False, value='Text-to-Image', choices=['Text-to-Image', 'Image-to-Image', 'Inpainting'], elem_id='sd_mode')
+                sd_save_image = gr.Button('Save', elem_id='sd_save_image').style(full_width=False)
                 sd_generate = gr.Button('Generate', variant='primary', elem_id='sd_generate').style(full_width=False)
 
+            with gr.Row():
+                sd_custom_code = gr.Textbox(label="Generate script (Python)", visible=cmd_opts.allow_code, lines=1)
+
         with gr.TabItem('Settings', id='settings_tab'):
-            # TODO: Add HTML output to indicate settings saved
             sd_settings = [create_setting_component(key) for key in opts.data_labels.keys()]
             with gr.Row():
                 sd_confirm_settings = gr.HTML(elem_id='sd_settings_html')
@@ -1764,7 +1624,6 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
         is_img2img = (mode == 'Image-to-Image')
         is_txt2img = (mode == 'Text-to-Image')
         is_inpainting = (mode == 'Inpainting')
-        is_pp = (mode == 'Post-Processing')
 
         return {
             sd_cfg: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
@@ -1777,18 +1636,16 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_image_height: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_image_width: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_custom_code: gr.update(visible=is_txt2img and cmd_opts.allow_code),
-            sd_input_seed: gr.update(visible=not is_pp and use_input_seed),
+            sd_input_seed: gr.update(visible=use_input_seed),
             sd_facefix: gr.update(visible=True),
-            # TODO: see above, but for facefix
             sd_facefix_strength: gr.update(visible=facefix),
             sd_matrix: gr.update(visible=is_img2img or is_txt2img),
             sd_loopback: gr.update(visible=is_img2img),
             sd_upscale: gr.update(visible=is_img2img),
             sd_inpainting_mask_blur: gr.update(visible=is_inpainting),
             sd_inpainting_mask_content: gr.update(visible=is_inpainting),
-            sd_input_image: gr.update(visible=is_img2img or is_pp,),
+            sd_input_image: gr.update(visible=is_img2img),
             sd_inpainting_image: gr.update(visible=is_inpainting),
-            sd_use_input_seed: gr.update(visible=not is_pp)
         }
 
     sd_mode.change(
@@ -1818,8 +1675,7 @@ with gr.Blocks(css=full_css, analytics_enabled=False, title='Stable Diffusion We
             sd_upscale,
             sd_inpainting_mask_blur,
             sd_inpainting_mask_content,
-            sd_inpainting_image,
-            sd_use_input_seed
+            sd_inpainting_image
         ]
     )
 

@@ -1,0 +1,132 @@
+.wrap .m-12 svg { display:none!important; }
+.wrap .m-12::before { content:"Loading..." }
+.progress-bar { display:none!important; }
+.meta-text { display:none!important; }
+.output-html p { margin: 0 0.5em; }
+.performance, .params-info, .comments-info { font-size: 0.85em; color: #666; }
+
+/* hide scrollbars, better scaling for gallery, small padding for main image */
+::-webkit-scrollbar { display: none }
+#output_gallery {
+    min-height: 50vh !important;
+    scrollbar-width: none;
+}
+
+#output_gallery > div > img {
+    padding-top: 0.5rem;
+    padding-right: 0.5rem;
+    padding-left: 0.5rem;
+}
+
+/* remove excess padding around prompt textbox, increase font size */
+#prompt_row input { font-size: 16px }
+#prompt_input {
+    padding-top: 0.25rem !important;
+    padding-bottom: 0rem !important;
+    padding-left: 0rem !important;
+    padding-right: 0rem !important;
+    border-style: none !important;
+}
+
+/* remove excess padding from mode dropdown, change appear to a button */
+#sd_mode {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    padding-left: 0.75rem !important;
+    padding-right: 0 !important;
+    border-style: none !important;
+}
+
+#sd_mode > label > select {
+    font-weight: 600;
+    min-height: 42px;
+    max-height: 42px;
+    text-align: center;
+    font-size: 1rem;
+    appearance: none;
+    -webkit-appearance: none;
+    background-position: right;
+    background-size: contain;
+    padding-right: 0;
+    padding-left: 0;
+    border-color: rgb(75 85 99 / var(--tw-border-opacity));
+    width: 15rem;
+    float: left;
+}
+
+/* custom column scaling (odd = right/left, even = center) */
+#body>.col:nth-child(odd) {
+    max-width: 450px;
+    min-width: 300px;
+}
+#body>.col:nth-child(even) {
+    width:250%;
+}
+
+/* better overall scaling + limits */
+.container {
+    max-width: min(1600px, 95%);
+}
+
+/* generate and save button size/alignment */
+#sd_generate, #sd_save_image {
+    width: 15rem;
+    flex: none;
+}
+
+/* spacing on the right side of generate */
+#sd_generate {
+    margin-right: 0.75rem;
+}
+
+#row_buttons {
+    border-top-style: solid;
+    border-top-color: rgb(55 65 81);
+    border-top-width: thin;
+    padding-top: 0.75rem;
+}
+
+/* save button size/alignment */
+#sd_save_settings {
+    width: 15rem;
+    flex: none;
+    margin-left: auto;
+}
+
+/* increase image size */
+#sd_inpaint_img, #sd_input_img {
+    aspect-ratio: 1;
+    width: 100%;
+    height: 100%;
+}
+
+#sd_inpaint_img > div[data-testid="image"], #sd_input_img > div[data-testid="image"] {
+    max-width: 100%;
+    max-height: 100%;
+    height: 100%;
+    width: 100%;
+    top: 0;
+    left: 0;
+    position: absolute;
+}
+
+/* fix group borders for split mask controls */
+#sd_inpainting_mask_content {
+    border-top-left-radius: 0;
+    border-top: none;
+}
+#sd_inpainting_mask_blur {
+    border-top: none;
+    border-top-right-radius: 0;
+}
+
+/* Hide number arrows */
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+input[type=number] {
+    -moz-appearance:textfield; /* Firefox */
+}
