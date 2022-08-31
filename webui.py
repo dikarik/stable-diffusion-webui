@@ -1587,6 +1587,7 @@ if os.path.isfile('userstyle.css'):
 else:
     userstyle_css = ''
 
+# TODO: check to make sure that their aren't alignment/size issues with the inpainting mask relative to the image if the image is not square
 with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='Stable Diffusion WebUI') as demo:
     with gr.Tabs(elem_id='tabs'):
         # Stable Diffusion tab
@@ -1648,15 +1649,24 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
                 sd_custom_code = gr.Textbox(label="Generate script (Python)", visible=cmd_opts.allow_code, lines=1)
 
         # Post-Processing tab
-        with gr.TabItem('Post-Processing', id='sd_post'):
+        with gr.TabItem('Post-Processing'):
+            # TODO: Offer direct access to GFPGAN and ESRGAN
             pass
 
         # History tab
         with gr.TabItem('History'):
+            # TODO: Provide two modes, 'Prompt History' and 'Saved Images'
+            #  Prompt History - Shows a log of all prompts in an HTML box
+            #  Saved Images   - Shows the last (up-to) ~10 images the user has saved via the save button
+            pass
+
+        # Image Info tab
+        with gr.TabItem('Image Info'):
+            # TODO: retrieve PNG chunks/JPG exif data which encodes seed and other settings used and show that to the user
             pass
 
         # Settings tab
-        with gr.TabItem('Settings', id='settings_tab'):
+        with gr.TabItem('Settings'):
             sd_settings = [create_setting_component(key) for key in opts.data_labels.keys()]
             with gr.Row():
                 sd_confirm_settings = gr.HTML(elem_id='sd_settings_html')

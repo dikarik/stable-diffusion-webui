@@ -82,7 +82,7 @@
 #row_buttons {
     border-top-style: solid;
     border-top-color: rgb(55 65 81);
-    border-top-width: thin;
+    border-top-width: 1px;
     padding-top: 0.75rem;
 }
 
