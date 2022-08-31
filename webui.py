@@ -1556,6 +1556,7 @@ else:
 
 with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='Stable Diffusion WebUI') as demo:
     with gr.Tabs(elem_id='tabs'):
+        # Stable Diffusion tab
         with gr.TabItem('Stable Diffusion', id='sd_tab'):
             with gr.Row(elem_id='prompt_row'):
                 sd_prompt = gr.Textbox(elem_id='prompt_input', placeholder='A corgi wearing a top hat as an oil painting.', lines=1, max_lines=1, show_label=False)
@@ -1613,6 +1614,15 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
             with gr.Row():
                 sd_custom_code = gr.Textbox(label="Generate script (Python)", visible=cmd_opts.allow_code, lines=1)
 
+        # Post-Processing tab
+        with gr.TabItem('Post-Processing', id='sd_post'):
+            pass
+
+        # History tab
+        with gr.TabItem('History'):
+            pass
+
+        # Settings tab
         with gr.TabItem('Settings', id='settings_tab'):
             sd_settings = [create_setting_component(key) for key in opts.data_labels.keys()]
             with gr.Row():
