@@ -203,3 +203,7 @@ input[type=number] {
     margin-bottom: 20px;
     display: flex;
 }
+
+#sd_script > label > textarea {
+    font-family: monospace;
+}

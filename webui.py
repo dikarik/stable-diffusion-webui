@@ -1652,7 +1652,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
                 sd_generate = gr.Button('Generate', variant='primary', elem_id='sd_generate').style(full_width=False)
 
             with gr.Row():
-                sd_custom_code = gr.Textbox(label="Generate script (Python)", visible=cmd_opts.allow_code, lines=1)
+                sd_custom_code = gr.Textbox(label="Generate script (Python)", visible=cmd_opts.allow_code, lines=1, elem_id='sd_script')
 
         # Post-Processing tab
         with gr.TabItem('Post-Processing'):
