@@ -1477,7 +1477,14 @@ def read_history():
         history_container = f'<div id="history" style="display: flex; flex-direction: column-reverse;">{history_contents}</div>'
         return history_container
     else:
-        return f'<p>No history saved</p>'
+        return plaintext_to_html('No history saved')
+
+def erase_history():
+    outdir = opts.outdir or "outputs/"
+    history_file_path = os.path.join(outdir, 'history.html')
+    os.remove(history_file_path)
+
+    return plaintext_to_html('History erased')
 
 def do_generate(
         mode: str,
@@ -1666,19 +1673,19 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
             with gr.Row(elem_id='pp_buttons_row'):
                 pp_submit = gr.Button('Submit', variant='primary', elem_id='pp_submit').style(full_width=False)
 
-        # History tab
-        with gr.TabItem('History'):
-            with gr.Row():
-                hist_refresh = gr.Button('Refresh', elem_id='hist_refresh')
-                hist_clear = gr.Button('Erase', elem_id='hist_erase')
-            with gr.Row():
-                hist_html = gr.HTML()
-
         # Image Info tab
         with gr.TabItem('Image Info'):
             with gr.Column():
                 info_input_image = gr.Image(show_label=False, source='upload', interactive=True, type='pil', elem_id='info_img')
                 info_html = gr.HTML()
+
+        # History tab
+        with gr.TabItem('History'):
+            with gr.Row():
+                hist_refresh = gr.Button('Refresh', elem_id='hist_refresh')
+                hist_erase = gr.Button('Erase', elem_id='hist_erase')
+            with gr.Row():
+                hist_html = gr.HTML(value=plaintext_to_html('Press refresh to load history'))
 
         # Settings tab
         with gr.TabItem('Settings'):
@@ -1849,6 +1856,12 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
     # Tab - History - Callbacks
     hist_refresh.click(
         read_history,
+        inputs=None,
+        outputs=hist_html
+    )
+
+    hist_erase.click(
+        erase_history,
         inputs=None,
         outputs=hist_html
     )

@@ -38,7 +38,7 @@ Looping fade in/out, seems to impact GPU render speed sadly
     padding-left: 0.5rem;
 }
 
-#output_gallery > div > button.gallery-item {
+#output_gallery > div > div > button.gallery-item {
     background-color: transparent !important;
 }
 
@@ -201,4 +201,5 @@ input[type=number] {
 #history_row {
     margin-left: 10px;
     margin-bottom: 20px;
+    display: flex;
 }
