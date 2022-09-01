@@ -92,10 +92,15 @@ Looping fade in/out, seems to impact GPU render speed sadly
     max-width: min(1600px, 95%);
 }
 
-/* generate and save button size/alignment */
-#sd_generate, #sd_save_image {
+/* button sizes */
+#sd_generate, #sd_save_image, #pp_submit {
     width: 15rem;
     flex: none;
+}
+
+/* post-processing buttons row */
+#pp_buttons_row {
+    flex-direction: row-reverse;
 }
 
 /* spacing on the right side of generate */
@@ -103,11 +108,22 @@ Looping fade in/out, seems to impact GPU render speed sadly
     margin-right: 0.75rem;
 }
 
-#row_buttons {
+#row_buttons, #pp_buttons_row {
     border-top-style: solid;
     border-top-color: rgb(55 65 81);
     border-top-width: 1px;
     padding-top: 0.75rem;
+}
+
+#info_img {
+    max-width: 60%;
+    min-height: 60vh;
+    margin: auto;
+    min-width: 60vh;
+}
+
+#pp_input_img, #pp_output_img {
+    min-height: 60vh;
 }
 
 /* save button size/alignment */
@@ -124,7 +140,11 @@ Looping fade in/out, seems to impact GPU render speed sadly
     height: 100%;
 }
 
-#sd_inpaint_img > div[data-testid="image"], #sd_input_img > div[data-testid="image"] {
+#sd_inpaint_img > div[data-testid="image"],
+#sd_input_img > div[data-testid="image"],
+#pp_input_img > div[data-testid="image"],
+#pp_output_img > div[data-testid="image"],
+#info_img > div[data-testid="image"] {
     max-width: 100%;
     max-height: 100%;
     height: 100%;
@@ -132,6 +152,11 @@ Looping fade in/out, seems to impact GPU render speed sadly
     top: 0;
     left: 0;
     position: absolute;
+}
+
+#pp_input_img > div[data-testid="image"] > div,
+#info_img > div[data-testid="image"] > div {
+    max-height: 100%;
 }
 
 /* fix group borders for split mask controls */
@@ -153,4 +178,27 @@ input::-webkit-inner-spin-button {
 
 input[type=number] {
     -moz-appearance:textfield; /* Firefox */
+}
+
+/* history tab styling and layout */
+#history_img {
+    display: block;
+    width: 64px;
+    height: 64px;
+    float: right;
+}
+
+#history_thumbnails {
+    float: left;
+    min-width: 192px;
+}
+
+#history_description {
+    margin-left: 20px;
+    float: left;
+}
+
+#history_row {
+    margin-left: 10px;
+    margin-bottom: 20px;
 }

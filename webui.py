@@ -96,6 +96,11 @@ try:
 
     realesrgan_models = [
         RealesrganModelInfo(
+            name="Real-ESRGAN 2x plus",
+            location="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+            netscale=2, model=lambda: RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+        ),
+        RealesrganModelInfo(
             name="Real-ESRGAN 4x plus",
             location="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
             netscale=4, model=lambda: RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
@@ -104,11 +109,6 @@ try:
             name="Real-ESRGAN 4x plus anime 6B",
             location="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
             netscale=4, model=lambda: RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
-        ),
-        RealesrganModelInfo(
-            name="Real-ESRGAN 2x plus",
-            location="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
-            netscale=2, model=lambda: RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
         ),
     ]
     have_realesrgan = True
@@ -172,6 +172,7 @@ class Options:
         "prompt_matrix_add_to_start": OptionInfo(True, "In prompt matrix, add the variable combination of text to the start of the prompt, rather than the end"),
         "sd_upscale_upscaler_index": OptionInfo("RealESRGAN", "Upscaler to use for SD upscale", gr.Radio, {"choices": list(sd_upscalers.keys())}),
         "sd_upscale_overlap": OptionInfo(64, "Overlap for tiles for SD upscale. The smaller it is, the less smooth transition from one tile to another", gr.Slider, {"minimum": 0, "maximum": 256, "step": 16}),
+        "enable_history": OptionInfo(True, "Enable saving prompt history and generated thumbnails for Text-to-Image mode"),
     }
 
     def __init__(self):
@@ -316,7 +317,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
 
     if extension == 'png' and opts.enable_pnginfo and info is not None:
         pnginfo = PngImagePlugin.PngInfo()
-        pnginfo.add_text("parameters", info)
+        pnginfo.add_text("Parameters", info)
     else:
         pnginfo = None
 
@@ -959,7 +960,6 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
 
             if p.prompt_matrix or opts.samples_save or opts.grid_save:
                 for i, x_sample in enumerate(x_samples_ddim):
-                    # TODO: convert to BGR colorspace?
                     x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
                     x_sample = x_sample.astype(np.uint8)
 
@@ -1069,52 +1069,6 @@ def txt2img(prompt: str, steps: int, sampler_index: int, use_GFPGAN: bool, stren
         processed = process_images(p)
 
     return processed.images, processed.info.html()
-
-
-class Flagging(gr.FlaggingCallback):
-
-    def setup(self, components, flagging_dir: str):
-        pass
-
-    def flag(self, flag_data, flag_option=None, flag_index=None, username=None):
-        import csv
-
-        os.makedirs("log/images", exist_ok=True)
-
-        # those must match the "txt2img" function
-        prompt, steps, sampler_index, use_gfpgan, gfpgan_strength, prompt_matrix, n_iter, batch_size, cfg_scale, seed, height, width, code, images, seed, comment = flag_data
-
-        filenames = []
-
-        with open("log/log.csv", "a", encoding="utf8", newline='') as file:
-            import time
-            import base64
-
-            at_start = file.tell() == 0
-            writer = csv.writer(file)
-            if at_start:
-                writer.writerow(["prompt", "seed", "width", "height", "cfgs", "steps", "filename"])
-
-            filename_base = str(int(time.time() * 1000))
-            for i, filedata in enumerate(images):
-                filename = "log/images/" + filename_base + ("" if len(images) == 1 else "-" + str(i + 1)) + ".png"
-
-                if filedata.startswith("data:image/png;base64,"):
-                    filedata = filedata[len("data:image/png;base64,"):]
-
-                with open(filename, "wb") as imgfile:
-                    imgfile.write(base64.decodebytes(filedata.encode('utf-8')))
-
-                filenames.append(filename)
-
-            writer.writerow([prompt, seed, width, height, cfg_scale, steps, filenames[0]])
-
-        print("Logged:", filenames[0])
-
-with gr.Blocks(analytics_enabled=False) as txt2img_interface:
-    with gr.Row():
-        prompt = gr.Textbox(label="Prompt", elem_id="txt2img_prompt", show_label=False, placeholder="Prompt", lines=1)
-        submit = gr.Button('Generate', variant='primary')
 
 def fill(image, mask):
     image_mod = Image.new('RGBA', (image.width, image.height))
@@ -1378,8 +1332,8 @@ def upscale_with_realesrgan(image, RealESRGAN_upscaling, RealESRGAN_model_index)
     image = Image.fromarray(upsampled)
     return image
 
-
-def run_extras(image, GFPGAN_strength, RealESRGAN_upscaling, RealESRGAN_model_index):
+# Post Processing
+def run_postprocessing(image, use_GFPGAN: bool, strength_GFPGAN: float, use_ESRGAN: bool, model_ESRGAN: int, scale_ESRGAN: float):
     torch_gc()
 
     if not image:
@@ -1389,28 +1343,29 @@ def run_extras(image, GFPGAN_strength, RealESRGAN_upscaling, RealESRGAN_model_in
 
     outpath = opts.outdir or "outputs/extras-samples"
 
-    if have_gfpgan and GFPGAN_strength > 0:
+    if have_gfpgan and use_GFPGAN and strength_GFPGAN > 0:
         gfpgan_model = gfpgan()
         img_data_bgr = np.array(image, dtype=np.uint8)[:, :, ::-1]
-        cropped_faces, restored_faces, restored_img = gfpgan_model.enhance(img_data_bgr, has_aligned=False, only_center_face=False, paste_back=True)
+        _, _, restored_img = gfpgan_model.enhance(img_data_bgr, has_aligned=False, only_center_face=False, paste_back=True)
         img_data_rgb = restored_img[:, :, ::-1]
         res = Image.fromarray(img_data_rgb)
 
-        if GFPGAN_strength < 1.0:
-            res = Image.blend(image, res, GFPGAN_strength)
+        if strength_GFPGAN < 1.0:
+            res = Image.blend(image, res, strength_GFPGAN)
 
         image = res
 
-    if have_realesrgan and RealESRGAN_upscaling != 1.0:
-        image = upscale_with_realesrgan(image, RealESRGAN_upscaling, RealESRGAN_model_index)
+    if have_realesrgan and use_ESRGAN and scale_ESRGAN != 1.0:
+        image = upscale_with_realesrgan(image, scale_ESRGAN, model_ESRGAN)
 
     base_count = len(os.listdir(outpath))
     save_image(image, outpath, f"{base_count:05}", None, '', opts.samples_format, short_filename=True)
 
-    return [image], 0, ''
+    return image
 
-
-def run_pnginfo(image):
+# Image Info
+# TODO: add embedded info to JPGs and add JPG parsing support
+def run_image_info(image):
     info = ''
     for key, text in image.info.items():
         info += f"""
@@ -1424,25 +1379,12 @@ def run_pnginfo(image):
         message = "Nothing found in the image."
         info = f"<div><p>{message}<p></div>"
 
-    return [info]
+    return info
 
-
-pnginfo_interface = gr.Interface(
-    wrap_gradio_call(run_pnginfo),
-    inputs=[
-        gr.Image(label="Source", source="upload", interactive=True, type="pil"),
-    ],
-    outputs=[
-        gr.HTML(),
-    ],
-    allow_flagging="never",
-    analytics_enabled=False,
-)
-
+# Settings
 opts = Options()
 if os.path.exists(config_filename):
     opts.load(config_filename)
-
 
 def run_settings(*args):
     for key, value in zip(opts.data_labels.keys(), args):
@@ -1487,6 +1429,55 @@ else:
 model_hijack = StableDiffusionModelHijack()
 model_hijack.hijack(sd_model)
 
+def images_to_html_div(images) -> str:
+    import base64
+    from io import BytesIO
+
+    image_tags = []
+    for img in images:
+        buffer = BytesIO()
+        # TODO: tweak quality if necessary
+        img.save(buffer, format='JPEG', quality=60)
+        img_b64 = 'data:image/jpeg;charset=utf-8;base64,' + base64.b64encode(buffer.getvalue()).decode('utf-8')
+        img_tag = f'<img id="history_img" src="{img_b64}"/>'
+        image_tags.append(img_tag)
+
+    embedded_thumbs = ''.join(image_tags)
+    thumbnail_div = f'<div id="history_thumbnails">{embedded_thumbs}</div>'
+
+    return thumbnail_div
+
+def create_history_row_div(thumbnail_div: str, html_info: str):
+    return f'<div id="history_row">{thumbnail_div}<div id="history_description">{html_info}</div></div>'
+
+def save_to_history(images, html):
+    outdir = opts.outdir or "outputs/"
+    history_file_path = os.path.join(outdir, 'history.html')
+
+    thumbnails = []
+    for img in images[:3]:
+        if img.width >= img.height:
+            thumbnails.append(img.resize((64, img.height * 64 // img.width), resample=Image.Resampling.BILINEAR))
+        else:
+            thumbnails.append(img.resize((img.width * 64 // img.height, 64), resample=Image.Resampling.BILINEAR))
+
+    thumbnail_div = images_to_html_div(thumbnails)
+
+    # TODO: add timestamp
+    # TODO: provide some max size limit and overwrite when at max size
+    with open(history_file_path, 'a', encoding='utf-8') as fd:
+        fd.write(create_history_row_div(thumbnail_div, html))
+
+def read_history():
+    outdir = opts.outdir or "outputs/"
+    history_file_path = os.path.join(outdir, 'history.html')
+
+    if os.path.exists(history_file_path):
+        history_contents = open(history_file_path, 'r', encoding='utf-8').read()
+        history_container = f'<div id="history" style="display: flex; flex-direction: column-reverse;">{history_contents}</div>'
+        return history_container
+    else:
+        return f'<p>No history saved</p>'
 
 def do_generate(
         mode: str,
@@ -1523,7 +1514,7 @@ def do_generate(
             raise Exception("Image dimensions must both be multiples of 64")
 
     if mode == 'Text-to-Image':
-        return txt2img(
+        images, html = txt2img(
             prompt=prompt,
             steps=sampler_steps,
             sampler_index=sampler_index,
@@ -1537,10 +1528,14 @@ def do_generate(
             height=image_height,
             width=image_width,
             code=custom_code,
-
         )
+
+        if opts.enable_history:
+            save_to_history(images, html)
+
     elif mode == 'Image-to-Image' or mode == 'Inpainting':
-        # TODO: turn this into a dropdown/radio buttons
+        # TODO(maybe): move SD upscale to post-procesing
+        # otherwise we need some complex UI handling to make it clear what options are mutually exclusive
         if mode == 'Image-to-Image':
             if upscale:
                 img2img_mode = Img2Img_Modes.UPSCALE
@@ -1551,7 +1546,7 @@ def do_generate(
         elif mode == 'Inpainting':
             img2img_mode = Img2Img_Modes.INPAINT
 
-        return img2img(
+        images, html = img2img(
             prompt=prompt,
             init_img=input_img,
             init_img_with_mask=inpainting_image,
@@ -1572,8 +1567,10 @@ def do_generate(
             width=image_width,
             resize_mode=resize_mode,
         )
+    else:
+        raise Exception('Invalid mode selected')
 
-    raise Exception('Invalid mode selected')
+    return images, html
 
 
 
@@ -1585,7 +1582,7 @@ def do_generate(
 webui_css = open('webui.css', 'r').read()
 
 if os.path.isfile('userstyle.css'):
-    userstyle_css = open('userstyle.css', 'r').read()
+    userstyle_css = open('userstyle.css', 'r', encoding='utf-8').read()
 else:
     userstyle_css = ''
 
@@ -1652,20 +1649,36 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
 
         # Post-Processing tab
         with gr.TabItem('Post-Processing'):
-            # TODO: Offer direct access to GFPGAN and ESRGAN
-            pass
+            with gr.Row():
+                pp_input_image = gr.Image(show_label=False, source='upload', interactive=True, type='pil', elem_id='pp_input_img')
+                pp_output_image = gr.Image(show_label=False, interactive=False, type='pil', elem_id='pp_output_img')
+
+            with gr.Row():
+                with gr.Column():
+                    pp_gfpgan_enable = gr.Checkbox(label='GFPGAN', value=False, interactive=have_gfpgan)
+                    pp_gfpgan_strength = gr.Slider(label='Strength', value=1.0, minimum=0.0, maximum=1.0, step=0.1, interactive=False)
+                with gr.Column():
+                    pp_esrgan_enable = gr.Checkbox(label='ESRGAN', value=False, interactive=have_realesrgan)
+                    pp_esrgan_model = gr.Dropdown(label='Model', choices=[x.name for x in realesrgan_models], value=realesrgan_models[0].name, type='index', interactive=False)
+                    pp_esrgan_scale = gr.Slider(label='Scale', minimum=1.0, step=0.1, maximum=4.0, interactive=False)
+                # TODO: add style transfer from https://www.tensorflow.org/tutorials/generative/style_transfer
+            
+            with gr.Row(elem_id='pp_buttons_row'):
+                pp_submit = gr.Button('Submit', variant='primary', elem_id='pp_submit').style(full_width=False)
 
         # History tab
         with gr.TabItem('History'):
-            # TODO: Provide two modes, 'Prompt History' and 'Saved Images'
-            #  Prompt History - Shows a log of all prompts in an HTML box
-            #  Saved Images   - Shows the last (up-to) ~10 images the user has saved via the save button
-            pass
+            with gr.Row():
+                hist_refresh = gr.Button('Refresh', elem_id='hist_refresh')
+                hist_clear = gr.Button('Erase', elem_id='hist_erase')
+            with gr.Row():
+                hist_html = gr.HTML()
 
         # Image Info tab
         with gr.TabItem('Image Info'):
-            # TODO: retrieve PNG chunks/JPG exif data which encodes seed and other settings used and show that to the user
-            pass
+            with gr.Column():
+                info_input_image = gr.Image(show_label=False, source='upload', interactive=True, type='pil', elem_id='info_img')
+                info_html = gr.HTML()
 
         # Settings tab
         with gr.TabItem('Settings'):
@@ -1675,6 +1688,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
                 sd_save_settings = gr.Button('Save', variant='primary', elem_id='sd_save_settings').style(full_width=False)
 
 
+    # Tab - Stable Diffusion - Callbacks
     def mode_change(mode: str, facefix: bool, use_input_seed: bool):
         is_img2img = (mode == 'Image-to-Image')
         is_txt2img = (mode == 'Text-to-Image')
@@ -1788,12 +1802,6 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
         outputs=sd_facefix_strength
     )
 
-    sd_save_settings.click(
-        fn=run_settings,
-        inputs=sd_settings,
-        outputs=sd_confirm_settings
-    )
-
     sd_image_height.submit(
         lambda value : 64 * ((value + 63) // 64),
         inputs=sd_image_height,
@@ -1810,6 +1818,53 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
         lambda checked: gr.update(visible=checked),
         inputs=sd_use_input_seed,
         outputs=sd_input_seed
+    )
+
+    # Tab - Post-Processing - Callbacks
+    pp_submit.click(
+        run_postprocessing,
+        inputs=[
+            pp_input_image,
+            pp_gfpgan_enable,
+            pp_gfpgan_strength,
+            pp_esrgan_enable,
+            pp_esrgan_model,
+            pp_esrgan_scale
+        ],
+        outputs=pp_output_image
+    )
+
+    pp_esrgan_enable.change(
+        lambda checked : {pp_esrgan_model: gr.update(interactive=checked), pp_esrgan_scale: gr.update(interactive=checked)},
+        inputs=pp_esrgan_enable,
+        outputs=[pp_esrgan_model, pp_esrgan_scale]
+    )
+
+    pp_gfpgan_enable.change(
+        lambda checked : gr.update(interactive=checked),
+        inputs=pp_gfpgan_enable,
+        outputs=pp_gfpgan_strength
+    )
+
+    # Tab - History - Callbacks
+    hist_refresh.click(
+        read_history,
+        inputs=None,
+        outputs=hist_html
+    )
+
+    # Tab - Image Info - Callbacks
+    info_input_image.change(
+        run_image_info,
+        inputs=info_input_image,
+        outputs=info_html
+    )
+
+    # Tab - Settings - Callbacks
+    sd_save_settings.click(
+        fn=run_settings,
+        inputs=sd_settings,
+        outputs=sd_confirm_settings
     )
 
 # TODO: make this an option?
