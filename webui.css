@@ -131,6 +131,10 @@ Looping fade in/out, seems to impact GPU render speed sadly
     aspect-ratio: 1;
     width: 100%;
     height: 100%;
+    border-top-right-radius: 0.5rem !important;
+    border-top-left-radius: 0.5rem !important;
+    border-top-style: dashed !important;
+    border-top-width: 1px !important;
 }
 
 #sd_inpaint_img > div[data-testid="image"],

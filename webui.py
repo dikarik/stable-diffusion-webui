@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 script_path = os.path.dirname(os.path.realpath(__file__))
 
@@ -85,11 +86,6 @@ gpu = torch.device("cuda")
 device = gpu if torch.cuda.is_available() else cpu
 batch_cond_uncond = cmd_opts.always_batch_cond_uncond or not (cmd_opts.lowvram or cmd_opts.medvram)
 queue_lock = threading.Lock()
-
-
-def gr_show(visible=True):
-    return {"visible": visible, "__type__": "update"}
-
 
 class State:
     interrupted = False
@@ -266,6 +262,9 @@ class Options:
         with open(filename, "r", encoding="utf8") as file:
             self.data = json.load(file)
 
+opts = Options()
+if os.path.exists(config_filename):
+    opts.load(config_filename)
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
@@ -1068,7 +1067,7 @@ class Processed:
         self.cfg_scale = p.cfg_scale
         self.steps = p.steps
 
-    def js(self):
+    def js(self) -> str:
         obj = {
             "prompt": self.prompt,
             "seed": int(self.seed),
@@ -1313,42 +1312,33 @@ def txt2img(
 
     return processed.images, processed.js(), processed.info.html()
 
-# TODO: make Save call this function, modify it a bit to work better in our implementation
-def save_files(js_data, images):
-    import csv
+def save_files(images, json_params):
+    if not images:
+        return
 
-    os.makedirs(opts.outdir_save, exist_ok=True)
+    timestamp = datetime.now().strftime("%d-%m-%Y %I_%M_%S")
+    outdir = os.path.join(opts.outdir_save, timestamp)
+    Path(outdir).mkdir(parents=True, exist_ok=True)
 
-    filenames = []
+    for i, filedata in enumerate(images):
+        filename = f'{i:04}' + ".png"
+        filepath = os.path.join(outdir, filename)
 
-    data = json.loads(js_data)
+        if filedata.startswith("data:image/png;base64,"):
+            filedata = filedata[len("data:image/png;base64,"):]
+        else:
+            print(f'filedata = {filedata}')
+            raise Exception('Unexpected filedata format')
 
-    with open("log/log.csv", "a", encoding="utf8", newline='') as file:
-        import time
-        import base64
+        with open(filepath, "wb") as imgfile:
+            imgfile.write(base64.decodebytes(filedata.encode('utf-8')))
 
-        at_start = file.tell() == 0
-        writer = csv.writer(file)
-        if at_start:
-            writer.writerow(["prompt", "seed", "width", "height", "sampler", "cfgs", "steps", "filename"])
+    json_path = os.path.join(outdir, 'params.json')
 
-        filename_base = str(int(time.time() * 1000))
-        for i, filedata in enumerate(images):
-            filename = filename_base + ("" if len(images) == 1 else "-" + str(i + 1)) + ".png"
-            filepath = os.path.join(opts.outdir_save, filename)
-
-            if filedata.startswith("data:image/png;base64,"):
-                filedata = filedata[len("data:image/png;base64,"):]
-
-            with open(filepath, "wb") as imgfile:
-                imgfile.write(base64.decodebytes(filedata.encode('utf-8')))
-
-            filenames.append(filename)
-
-        writer.writerow([data["prompt"], data["seed"], data["width"], data["height"], data["sampler"], data["cfg_scale"], data["steps"], filenames[0]])
-
-    return '', '', plaintext_to_html(f"Saved: {filenames[0]}")
-
+    # double stringified for some reason
+    params = json.loads(json.loads(json_params))
+    with open(json_path, 'w') as fd:
+        json.dump(params, fd, indent=4)
 
 def get_crop_region(mask, pad=0):
     h, w = mask.shape
@@ -1731,9 +1721,6 @@ def run_image_info(image):
     return info
 
 # Settings
-opts = Options()
-if os.path.exists(config_filename):
-    opts.load(config_filename)
 
 def run_settings(*args):
     for key, value in zip(opts.data_labels.keys(), args):
@@ -1954,7 +1941,7 @@ def do_generate(
     else:
         raise Exception('Invalid mode selected')
 
-    return images, html
+    return images, js, html
 
 
 
@@ -2045,6 +2032,8 @@ with gr.Blocks(css=webui_css + userstyle_css + history_css, analytics_enabled=Fa
 
             with gr.Row():
                 sd_custom_code = gr.Textbox(label="Generate script (Python)", visible=cmd_opts.allow_code, lines=1, elem_id='sd_script')
+                # used to the params used to generate the current gallery images
+                sd_hidden_json = gr.JSON(show_label=False, visible=False)
 
         # Post-Processing tab
         with gr.TabItem('Post-Processing'):
@@ -2168,7 +2157,8 @@ with gr.Blocks(css=webui_css + userstyle_css + history_css, analytics_enabled=Fa
         ],
         outputs=[
             sd_output_image,
-            sd_output_html
+            sd_hidden_json,
+            sd_output_html,
         ]
     )
 
@@ -2203,6 +2193,15 @@ with gr.Blocks(css=webui_css + userstyle_css + history_css, analytics_enabled=Fa
         lambda checked: gr.update(visible=checked),
         inputs=sd_use_input_seed,
         outputs=sd_input_seed
+    )
+
+    sd_save_image.click(
+        fn=save_files,
+        inputs=[
+            sd_output_image,
+            sd_hidden_json
+        ],
+        outputs=None
     )
 
     # Tab - Post-Processing - Callbacks
@@ -2270,18 +2269,5 @@ interrupt.click(
     fn=lambda: state.interrupt(),
     inputs=[],
     outputs=[],
-)
-
-save.click(
-    fn=wrap_gradio_call(save_files),
-    inputs=[
-        generation_info,
-        gallery,
-    ],
-    outputs=[
-        html_info,
-        html_info,
-        html_info,
-    ]
 )
 '''
