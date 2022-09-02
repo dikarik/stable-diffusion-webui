@@ -6,50 +6,83 @@ Original script with Gradio UI was written by a kind anonymous user. This is a m
 ![](screenshot.png)
 ## Installing and running
 
-### Stable Diffusion
+You need [python](https://www.python.org/downloads/windows/) and [git](https://git-scm.com/download/win)
+installed to run this, and an NVidia videocard.
 
-This script assumes that you already have main Stable Diffusion sutff installed, assumed to be in directory `/sd`.
-If you don't have it installed, follow the guide:
+I tested the installation to work Windows with Python 3.8.10, and with Python 3.10.6. You may be able
+to have success with different versions.
 
-- https://rentry.org/kretard
+You need Stable Diffusion model checkpoint, a big file containing the neural network weights. You
+can obtain it from the following places:
+ - [official download](https://huggingface.co/CompVis/stable-diffusion-v-1-4-original)
+ - [file storage](https://drive.yerf.org/wl/?id=EBfTrmcCCUAGaQBXVIj5lJmEhjoP1tgl)
+ - magnet:?xt=urn:btih:3a4a612d75ed088ea542acac52f9f45987488d1c&dn=sd-v1-4.ckpt&tr=udp%3a%2f%2ftracker.openbittorrent.com%3a6969%2fannounce&tr=udp%3a%2f%2ftracker.opentrackr.org%3a1337
 
-This repository's `webgui.py` is a replacement for `kdiff.py` from the guide.
+You optionally can use GPFGAN to improve faces, then you'll need to download the model from [here](https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth).
 
-Particularly, following files must exist:
+Instructions:
 
-- `/sd/configs/stable-diffusion/v1-inference.yaml`
-- `/sd/models/ldm/stable-diffusion-v1/model.ckpt`
-- `/sd/ldm/util.py`
-- `/sd/k_diffusion/__init__.py`
+```commandline
+:: crate a directory somewhere for stable diffusion and open cmd in it;
+:: make sure you are in the right directory; the command must output the directory you chose
+echo %cd%
 
-### GFPGAN
+:: install torch with CUDA support. See https://pytorch.org/get-started/locally/ for more instructions if this fails.
+pip install torch --extra-index-url https://download.pytorch.org/whl/cu113
 
-If you want to use GFPGAN to improve generated faces, you need to install it separately.
-Follow instructions from https://github.com/TencentARC/GFPGAN, but when cloning it, do so into Stable Diffusion main directory, `/sd`.
-After that download [GFPGANv1.3.pth](https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth) and put it
-into the `/sd/GFPGAN/experiments/pretrained_models` directory. If you're getting troubles with GFPGAN support, follow instructions
-from the GFPGAN's repository until `inference_gfpgan.py` script works.
+:: check if torch supports GPU; this must output "True". You need CUDA 11. installed for this. You might be able to use
+:: a different version, but this is what I tested.
+python -c "import torch; print(torch.cuda.is_available())"
 
-The following files must exist:
+:: clone Stable Diffusion repositories
+git clone https://github.com/CompVis/stable-diffusion.git
+git clone https://github.com/CompVis/taming-transformers
 
-- `/sd/GFPGAN/inference_gfpgan.py`
-- `/sd/GFPGAN/experiments/pretrained_models/GFPGANv1.3.pth`
+:: install requirements of Stable Diffusion
+pip install transformers==4.19.2 diffusers invisible-watermark
 
-If the GFPGAN directory does not exist, you will not get the option to use GFPGAN in the UI. If it does exist, you will either be able
-to use it, or there will be a message in console with an error related to GFPGAN.
+:: install k-diffusion
+pip install git+https://github.com/crowsonkb/k-diffusion.git
 
-### Web UI
+:: (optional) install GFPGAN to fix faces
+pip install git+https://github.com/TencentARC/GFPGAN.git
 
-Run the script as:
+:: go into stable diffusion's repo directory
+cd stable-diffusion
 
-`python webui.py`
+:: clone web ui
+git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui.git
 
-When running the script, you must be in the main Stable Diffusion directory, `/sd`. If you cloned this repository into a subdirectory 
-of `/sd`, say, the `stable-diffusion-webui` directory, you will run it as:
+:: install requirements of web ui
+pip install -r stable-diffusion-webui/requirements.txt
 
-`python stable-diffusion-webui/webui.py`
+:: update numpy to latest version
+pip install -U numpy
 
-When launching, you may get a very long warning message related to some weights not being used. You may freely ignore it.
+:: (outside of command line) put stable diffusion model into models/ldm/stable-diffusion-v1/model.ckpt; you'll have
+:: to create one missing directory;
+:: the command below must output something like: 1 File(s) 4,265,380,512 bytes
+dir models\ldm\stable-diffusion-v1\model.ckpt
+
+:: (outside of command line) put the GFPGAN model into same directory as webui script
+:: the command below must output something like: 1 File(s) 348,632,874 bytes
+dir stable-diffusion-webui\GFPGANv1.3.pth
+```
+
+After that the installation is finished.
+
+Run the command to start web ui:
+
+```
+python stable-diffusion-webui/webui.py
+```
+
+If you have a 4GB video card, run the command with either `--lowvram` or `--medvram` argument:
+
+```
+python stable-diffusion-webui/webui.py --medvram
+```
+
 After a while, you will get a message like this:
 
 ```
@@ -57,6 +90,20 @@ Running on local URL:  http://127.0.0.1:7860/
 ```
 
 Open the URL in browser, and you are good to go.
+
+
+### What options to use for low VRAM videocardsd?
+- If you have 4GB VRAM and want to make 512x512 (or maybe up to 640x640) images, use `--medvram`.
+- If you have 4GB VRAM and want to make 512x512 images, but you get an out of memory error with `--medvram`, use `--lowvram --always-batch-cond-uncond` instead.
+- If you have 4GB VRAM and want to make images larger than you can with `--medvram`, use `--lowvram`.
+- If you have more VRAM and want to make larger images than you can usually make, use `--medvram`. You can use `--lowvram`
+also but the effect will likely be barely noticeable.
+- Otherwise, do not use any of those.
+
+Extra: if you get a green screen instead of generated pictures, you have a card that doesn't support half
+precision floating point numbers. You must use `--precision full --no-half` in addition to other flags,
+and the model will take much more space in VRAM.
+
 
 ## Features
 The script creates a web UI for Stable Diffusion's txt2img and img2img scripts. Following are features added
@@ -190,7 +237,7 @@ were commandline. Settings are saved to config.js file. Settings that remain as 
 options are ones that are required at startup.
 
 ### Attention
-Using `()` in prompt decreases model's attention to enclosed words, and `[]` increases it. You can combine
+Using `()` in prompt increases model's attention to enclosed words, and `[]` decreases it. You can combine
 multiple modifiers:
 
 ![](images/attention-3.jpg)
@@ -253,17 +300,18 @@ print("Seed was: " + str(processed.seed))
 display(processed.images, processed.seed, processed.info)
 ```
 
-### `--lowvram`
+### 4GB videocard support
 Optimizations for GPUs with low VRAM. This should make it possible to generate 512x512 images on videocards with 4GB memory.
 
-The original idea of those optimizations is by basujindal: https://github.com/basujindal/stable-diffusion. Model is separated into modules,
-and only one module is kept in GPU memory; when another module needs to run, the previous is removed from GPU memory.
-
-It should be obvious but the nature of those optimizations makes the processing run slower -- about 10 times slower
+`--lowvram` is a reimplementation of optimization idea from by [basujindal](https://github.com/basujindal/stable-diffusion).
+Model is separated into modules, and only one module is kept in GPU memory; when another module needs to run, the previous
+is removed from GPU memory. The nature of this optimization makes the processing run slower -- about 10 times slower
 compared to normal operation on my RTX 3090.
 
-This is an independent implementation that does not require any modification to original Stable Diffusion code, and
-with all code concenrated in one place rather than scattered around the program.
+`--medvram` is another optimization that should reduce VRAM usage significantly by not processing conditional and
+unconditional denoising in a same batch.
+
+This implementation of optimization does not require any modification to original Stable Diffusion code.
 
 ### Inpainting
 In img2img tab, draw a mask over a part of image, and that part will be in-painted.
