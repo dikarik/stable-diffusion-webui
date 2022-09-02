@@ -43,6 +43,8 @@ import signal
 import tqdm
 import re
 import threading
+import base64
+from io import BytesIO
 
 import k_diffusion.sampling
 from ldm.util import instantiate_from_config
@@ -207,7 +209,7 @@ class Options:
         "outdir_samples": OptionInfo("", "Output dictectory for images; if empty, defaults to two directories below"),
         "outdir_txt2img_samples": OptionInfo("outputs/txt2img-images", 'Output dictectory for txt2img images'),
         "outdir_img2img_samples": OptionInfo("outputs/img2img-images", 'Output dictectory for img2img images'),
-        "outdir_extras_samples": OptionInfo("outputs/extras-images", 'Output dictectory for images from extras tab'),
+        "outdir_extras_samples": OptionInfo("outputs/post-images", 'Output dictectory for images from post-processing'),
         "outdir_grids": OptionInfo("", "Output dictectory for grids; if empty, defaults to two directories below"),
         "outdir_txt2img_grids": OptionInfo("outputs/txt2img-grids", 'Output dictectory for txt2img grids'),
         "outdir_img2img_grids": OptionInfo("outputs/img2img-grids", 'Output dictectory for img2img grids'),
@@ -229,8 +231,9 @@ class Options:
         "prompt_matrix_add_to_start": OptionInfo(True, "In prompt matrix, add the variable combination of text to the start of the prompt, rather than the end"),
         "sd_upscale_upscaler_index": OptionInfo("RealESRGAN", "Upscaler to use for SD upscale", gr.Radio, {"choices": list(sd_upscalers.keys())}),
         "sd_upscale_overlap": OptionInfo(64, "Overlap for tiles for SD upscale. The smaller it is, the less smooth transition from one tile to another", gr.Slider, {"minimum": 0, "maximum": 256, "step": 16}),
-        "enable_history": OptionInfo(True, "Enable saving prompt history and generated thumbnails for Text-to-Image mode"),
-        # TODO: Remove this and make it part of the Syntactic prompts checkbox
+        "enable_history": OptionInfo(True, "Enable saving prompt history and thumbnails for txt2img"),
+        "history_thumbnail_res": OptionInfo(64, "Set the resolution (in pixels) of thumbnails for the History tab (restart and refresh required)", gr.Slider, {"minimum": 64, "maximum": 128, "step": 32}),
+        # TODO: Remove this and make it part of the Syntactic prompts settings
         "enable_emphasis": OptionInfo(True, "Use (text) to make model pay more attention to text text and [text] to make it pay less attention"),
         "save_txt": OptionInfo(False, "Create a text file next to every image with generation parameters."),
     }
@@ -421,6 +424,9 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
 
         image.save(f"{fullfn_without_extension}.jpg", quality=opts.jpeg_quality, pnginfo=pnginfo)
 
+    if opts.save_txt and info is not None:
+        with open(f"{fullfn_without_extension}.txt", "w", encoding="utf-8") as file:
+            file.write(info + "\n")
 
 def sanitize_filename_part(text):
     return text.replace(' ', '_').translate({ord(x): '' for x in invalid_filename_chars})[:128]
@@ -1703,6 +1709,9 @@ def run_postprocessing(image, use_GFPGAN: bool, strength_GFPGAN: float, use_ESRG
 
     return [image, '']
 
+
+# ---- FRONTEND CODE STARTS HERE ---- #
+
 # Image Info
 # TODO: add embedded info to JPGs and add JPG parsing support
 def run_image_info(image):
@@ -1774,44 +1783,68 @@ else:
 model_hijack = StableDiffusionModelHijack()
 model_hijack.hijack(sd_model)
 
-def images_to_html_div(images) -> str:
-    import base64
-    from io import BytesIO
+class HistoryEntry:
+    def __init__(self, images: Image=None, description: str=None):
+        self.images = images
+        self.description = description
 
-    image_tags = []
-    for img in images:
-        buffer = BytesIO()
-        # TODO: tweak quality if necessary
-        img.save(buffer, format='JPEG', quality=60)
-        img_b64 = 'data:image/jpeg;charset=utf-8;base64,' + base64.b64encode(buffer.getvalue()).decode('utf-8')
-        img_tag = f'<img id="history_img" src="{img_b64}"/>'
-        image_tags.append(img_tag)
+    class HistoryImage:
+        def __init__(self, image: Image):
+            self.image = image
 
-    embedded_thumbs = ''.join(image_tags)
-    thumbnail_div = f'<div id="history_thumbnails">{embedded_thumbs}</div>'
+        @staticmethod
+        def make_thumbnail(image: Image) -> Image:
+            maxres = opts.history_thumbnail_res
+            if image.width >= image.height:
+                thumbnail_dim = (maxres, image.height * maxres // image.width)
+            else:
+                thumbnail_dim = (image.width * maxres // image.height, maxres)
 
-    return thumbnail_div
+            return image.resize(thumbnail_dim, resample=Image.Resampling.BICUBIC)
 
-def create_history_row_div(thumbnail_div: str, html_info: str):
-    return f'<div id="history_row">{thumbnail_div}<div id="history_description">{html_info}</div></div>'
+        def html(self) -> str:
+            thumb = self.make_thumbnail(self.image)
+            buffer = BytesIO()
+
+            thumb.save(buffer, format='JPEG', quality=60)
+            img_b64 = 'data:image/jpeg;charset=utf-8;base64,' + base64.b64encode(buffer.getvalue()).decode('utf-8')
+            img_tag = f'<img id="history_img" src="{img_b64}"/>'
+            img_div = f'<div id="history_thumb">{img_tag}</div>'
+
+            return img_div
+
+    class HistoryDescription:
+        def __init__(self, description=None):
+            self.description = description
+        
+        def html(self):
+            return f'<div id="history_description">{self.description}</div>'
+
+    def html(self):
+        history_images = [HistoryEntry.HistoryImage(img) for img in self.images]
+        thumbnails_contents = ''.join([x.html() for x in history_images])
+        thumbnails = f'<div id="history_thumbnails">{thumbnails_contents}</div>'
+
+        history_description = HistoryEntry.HistoryDescription(self.description).html()
+
+        contents = thumbnails + history_description
+        return f'<div id="history_row">{contents}</div>'
 
 def save_to_history(images, html):
     outdir = opts.outdir or "outputs/"
     history_file_path = os.path.join(outdir, 'history.html')
 
-    thumbnails = []
-    for img in images[:3]:
-        if img.width >= img.height:
-            thumbnails.append(img.resize((64, img.height * 64 // img.width), resample=Image.Resampling.BILINEAR))
-        else:
-            thumbnails.append(img.resize((img.width * 64 // img.height, 64), resample=Image.Resampling.BILINEAR))
+    # Skip the grid image if return grids is on
+    if (opts.return_grid):
+        entry = HistoryEntry(images=images[1:4], description=html)
+    else:
+        entry = HistoryEntry(images=images[:3], description=html)
 
-    thumbnail_div = images_to_html_div(thumbnails)
-
-    # TODO: add timestamp
     # TODO: provide some max size limit and overwrite when at max size
+    # TODO(maybe): add timestamp
+    # TODO(maybe): provide link to file on disk if file was saved
     with open(history_file_path, 'a', encoding='utf-8') as fd:
-        fd.write(create_history_row_div(thumbnail_div, html))
+        fd.write(entry.html())
 
 def read_history():
     outdir = opts.outdir or "outputs/"
@@ -1937,8 +1970,25 @@ if os.path.isfile('userstyle.css'):
 else:
     userstyle_css = ''
 
+# Some History CSS needs to be dynamic to support custom settings
+history_css = f"""
+#history_img {{
+    max-width: {opts.history_thumbnail_res}px;
+    max-height: {opts.history_thumbnail_res}px;
+}}
+
+#history_thumbnails {{
+    min-width: {int(3 * opts.history_thumbnail_res + 40)}px;
+}}
+
+#history_thumb {{
+    min-width: {opts.history_thumbnail_res}px;
+    min-height: {opts.history_thumbnail_res}px;
+}}
+"""
+
 # TODO: check to make sure that their aren't alignment/size issues with the inpainting mask relative to the image if the image is not square
-with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='Stable Diffusion WebUI') as demo:
+with gr.Blocks(css=webui_css + userstyle_css + history_css, analytics_enabled=False, title='Stable Diffusion WebUI') as demo:
     with gr.Tabs(elem_id='tabs'):
         # Stable Diffusion tab
         with gr.TabItem('Stable Diffusion', id='sd_tab'):

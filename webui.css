@@ -174,24 +174,6 @@ input[type=number] {
 }
 
 /* history tab styling and layout */
-#history_img {
-    display: block;
-    float: right;
-    max-width: 64px;
-    max-height: 64px;
-    padding-left: 1px;
-}
-
-#history_thumbnails {
-    float: left;
-    min-width: 230px;
-    border-right: thick;
-    border-color: rgb(55 65 81);
-    border-right-style: solid;
-    border-right-width: 1px;
-    padding-right: 16px;
-}
-
 #history_description {
     margin-left: 10px;
     float: left;
@@ -201,6 +183,30 @@ input[type=number] {
     margin-left: 20px;
     margin-bottom: 20px;
     display: flex;
+}
+
+#history_thumbnails {
+    float: left;
+    display: flex;
+    flex-direction: row;
+    justify-content: right;
+    border-right: thick;
+    border-color: rgb(55 65 81);
+    border-right-style: solid;
+    border-right-width: 1px;
+    padding-right: 16px;
+}
+
+#history_thumb {
+    display: flex;
+    justify-content: center;
+}
+
+#history_img {
+    display: block;
+    float: right;
+    padding-left: 1px;
+    margin: auto;
 }
 
 #sd_script > label > textarea {
