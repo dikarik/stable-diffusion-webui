@@ -1835,7 +1835,7 @@ def save_to_history(images, html):
     history_file_path = os.path.join(outdir, 'history.html')
 
     # Skip the grid image if return grids is on
-    if (opts.return_grid):
+    if opts.return_grid and len(images) > 1:
         entry = HistoryEntry(images=images[1:4], description=html)
     else:
         entry = HistoryEntry(images=images[:3], description=html)
