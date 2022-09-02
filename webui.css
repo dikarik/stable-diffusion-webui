@@ -93,14 +93,9 @@ Looping fade in/out, seems to impact GPU render speed sadly
 }
 
 /* button sizes */
-#sd_generate, #sd_save_image, #pp_submit {
+#sd_generate, #sd_save_image, #pp_submit, #sd_save_settings {
     width: 15rem;
     flex: none;
-}
-
-/* post-processing buttons row */
-#pp_buttons_row {
-    flex-direction: row-reverse;
 }
 
 /* spacing on the right side of generate */
@@ -126,10 +121,8 @@ Looping fade in/out, seems to impact GPU render speed sadly
     min-height: 60vh;
 }
 
-/* save button size/alignment */
-#sd_save_settings {
-    width: 15rem;
-    flex: none;
+/* left alignment for postprocesing/settings row buttons */
+#sd_save_settings, #pp_submit {
     margin-left: auto;
 }
 
@@ -200,7 +193,7 @@ input[type=number] {
 }
 
 #history_description {
-    margin-left: 20px;
+    margin-left: 10px;
     float: left;
 }
 

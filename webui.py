@@ -36,6 +36,7 @@ import json
 import traceback
 from datetime import datetime
 from enum import IntEnum
+from typing import Optional
 from collections import namedtuple
 from contextlib import nullcontext
 import signal
@@ -229,6 +230,7 @@ class Options:
         "sd_upscale_upscaler_index": OptionInfo("RealESRGAN", "Upscaler to use for SD upscale", gr.Radio, {"choices": list(sd_upscalers.keys())}),
         "sd_upscale_overlap": OptionInfo(64, "Overlap for tiles for SD upscale. The smaller it is, the less smooth transition from one tile to another", gr.Slider, {"minimum": 0, "maximum": 256, "step": 16}),
         "enable_history": OptionInfo(True, "Enable saving prompt history and generated thumbnails for Text-to-Image mode"),
+        # TODO: Remove this and make it part of the Syntactic prompts checkbox
         "enable_emphasis": OptionInfo(True, "Use (text) to make model pay more attention to text text and [text] to make it pay less attention"),
         "save_txt": OptionInfo(False, "Create a text file next to every image with generation parameters."),
     }
@@ -914,7 +916,6 @@ class StableDiffusionProcessing:
         self.use_GFPGAN: bool = use_GFPGAN
         self.do_not_save_samples: bool = do_not_save_samples
         self.do_not_save_grid: bool = do_not_save_grid
-        self.strength_GFPGAN: bool = strength_GFPGAN
         self.extra_generation_params: dict = extra_generation_params
         self.overlay_images = overlay_images
         self.paste_to = None
@@ -1249,7 +1250,21 @@ class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
         return samples_ddim
 
 
-def txt2img(prompt: str, negative_prompt: str, steps: int, sampler_index: int, use_GFPGAN: bool, prompt_matrix: bool, n_iter: int, batch_size: int, cfg_scale: float, seed: int, height: int, width: int, code: str):
+def txt2img(
+    prompt: str,
+    negative_prompt: Optional[str],
+    steps: int,
+    sampler_index: int,
+    use_GFPGAN: bool,
+    prompt_matrix: bool,
+    n_iter: int,
+    batch_size: int,
+    cfg_scale: float,
+    seed: int,
+    height: int,
+    width: int,
+    code: str):
+
     p = StableDiffusionProcessingTxt2Img(
         outpath_samples=opts.outdir_samples or opts.outdir_txt2img_samples,
         outpath_grids=opts.outdir_grids or opts.outdir_txt2img_grids,
@@ -1265,7 +1280,6 @@ def txt2img(prompt: str, negative_prompt: str, steps: int, sampler_index: int, u
         height=height,
         prompt_matrix=prompt_matrix,
         use_GFPGAN=use_GFPGAN,
-        strength_GFPGAN=strength_GFPGAN
     )
 
     if code != '' and cmd_opts.allow_code:
@@ -1293,6 +1307,7 @@ def txt2img(prompt: str, negative_prompt: str, steps: int, sampler_index: int, u
 
     return processed.images, processed.js(), processed.info.html()
 
+# TODO: make Save call this function, modify it a bit to work better in our implementation
 def save_files(js_data, images):
     import csv
 
@@ -1327,53 +1342,6 @@ def save_files(js_data, images):
         writer.writerow([data["prompt"], data["seed"], data["width"], data["height"], data["sampler"], data["cfg_scale"], data["steps"], filenames[0]])
 
     return '', '', plaintext_to_html(f"Saved: {filenames[0]}")
-
-# TODO: integrate this code
-txt2img_args = dict(
-    fn=wrap_gradio_gpu_call(txt2img),
-    inputs=[
-        prompt,
-        negative_prompt,
-        steps,
-        sampler_index,
-        use_GFPGAN,
-        prompt_matrix,
-        batch_count,
-        batch_size,
-        cfg_scale,
-        seed,
-        height,
-        width,
-        code
-    ],
-    outputs=[
-        gallery,
-        generation_info,
-        html_info
-    ]
-)
-
-prompt.submit(**txt2img_args)
-submit.click(**txt2img_args)
-
-interrupt.click(
-    fn=lambda: state.interrupt(),
-    inputs=[],
-    outputs=[],
-)
-
-save.click(
-    fn=wrap_gradio_call(save_files),
-    inputs=[
-        generation_info,
-        gallery,
-    ],
-    outputs=[
-        html_info,
-        html_info,
-        html_info,
-    ]
-)
 
 
 def get_crop_region(mask, pad=0):
@@ -1545,7 +1513,29 @@ class Img2Img_Modes(IntEnum):
     LOOPBACK = 2
     UPSCALE = 3
 
-def img2img(prompt: str, init_img, init_img_with_mask, steps: int, sampler_index: int, mask_blur: int, inpainting_fill: int, use_GFPGAN: bool, prompt_matrix, mode: int, n_iter: int, batch_size: int, cfg_scale: float, denoising_strength: float, seed: int, height: int, width: int, resize_mode: int, upscaler_name: str, upscale_overlap: int, inpaint_full_res: bool):
+def img2img(
+    prompt: str,
+    init_img,
+    init_img_with_mask,
+    steps: int,
+    sampler_index: int,
+    mask_blur: int,
+    inpainting_fill: int,
+    use_GFPGAN: bool,
+    prompt_matrix,
+    mode: int,
+    n_iter: int,
+    batch_size: int,
+    cfg_scale: float,
+    denoising_strength: float,
+    seed: int,
+    height: int,
+    width: int,
+    resize_mode: int,
+    upscaler_name: str,
+    upscale_overlap: int,
+    inpaint_full_res: bool):
+
     is_classic = mode == Img2Img_Modes.CLASSIC
     is_inpaint = mode == Img2Img_Modes.INPAINT
     is_loopback = mode == Img2Img_Modes.LOOPBACK
@@ -1574,7 +1564,6 @@ def img2img(prompt: str, init_img, init_img_with_mask, steps: int, sampler_index
         height=height,
         prompt_matrix=prompt_matrix,
         use_GFPGAN=use_GFPGAN,
-        strength_GFPGAN=strength_GFPGAN,
         init_images=[image],
         mask=mask,
         mask_blur=mask_blur,
@@ -1669,61 +1658,6 @@ def img2img(prompt: str, init_img, init_img_with_mask, steps: int, sampler_index
 
     return processed.images, processed.js(), processed.info.html()
 
-# TODO: integrate code
-img2img_args = dict(
-    fn=wrap_gradio_gpu_call(img2img),
-    inputs=[
-        prompt,
-        init_img,
-        init_img_with_mask,
-        steps,
-        sampler_index,
-        mask_blur,
-        inpainting_fill,
-        use_GFPGAN,
-        prompt_matrix,
-        switch_mode,
-        batch_count,
-        batch_size,
-        cfg_scale,
-        denoising_strength,
-        seed,
-        height,
-        width,
-        resize_mode,
-        sd_upscale_upscaler_name,
-        sd_upscale_overlap,
-        inpaint_full_res,
-    ],
-    outputs=[
-        gallery,
-        generation_info,
-        html_info
-    ]
-)
-
-prompt.submit(**img2img_args)
-submit.click(**img2img_args)
-
-interrupt.click(
-    fn=lambda: state.interrupt(),
-    inputs=[],
-    outputs=[],
-)
-
-save.click(
-    fn=wrap_gradio_call(save_files),
-    inputs=[
-        generation_info,
-        gallery,
-    ],
-    outputs=[
-        html_info,
-        html_info,
-        html_info,
-    ]
-)
-
 def upscale_with_realesrgan(image, RealESRGAN_upscaling, RealESRGAN_model_index):
     info = realesrgan_models[RealESRGAN_model_index]
 
@@ -1767,27 +1701,7 @@ def run_postprocessing(image, use_GFPGAN: bool, strength_GFPGAN: float, use_ESRG
 
     save_image(image, outpath, "", None, '', opts.samples_format, short_filename=True, no_prompt=True)
 
-    return image
-
-
-# TODO: integrate code
-extras_interface = gr.Interface(
-    wrap_gradio_gpu_call(run_extras),
-    inputs=[
-        gr.Image(label="Source", source="upload", interactive=True, type="pil"),
-        gr.Slider(minimum=0.0, maximum=1.0, step=0.001, label="GFPGAN strength", value=1, interactive=have_gfpgan),
-        gr.Slider(minimum=1.0, maximum=4.0, step=0.05, label="Real-ESRGAN upscaling", value=2, interactive=have_realesrgan),
-        gr.Radio(label='Real-ESRGAN model', choices=[x.name for x in realesrgan_models], value=realesrgan_models[0].name, type="index", interactive=have_realesrgan),
-    ],
-    outputs=[
-        gr.Image(label="Result"),
-        gr.HTML(),
-        gr.HTML(),
-    ],
-    allow_flagging="never",
-    analytics_enabled=False,
-)
-
+    return [image, '']
 
 # Image Info
 # TODO: add embedded info to JPGs and add JPG parsing support
@@ -1806,21 +1720,6 @@ def run_image_info(image):
         info = f"<div><p>{message}<p></div>"
 
     return info
-
-# TODO: integrate code
-pnginfo_interface = gr.Interface(
-    wrap_gradio_call(run_pnginfo),
-    inputs=[
-        gr.Image(label="Source", source="upload", interactive=True, type="pil"),
-    ],
-    outputs=[
-        gr.HTML(),
-        gr.HTML(),
-        gr.HTML(),
-    ],
-    allow_flagging="never",
-    analytics_enabled=False,
-)
 
 # Settings
 opts = Options()
@@ -1947,16 +1846,13 @@ def do_generate(
         image_width: int,
         custom_code: str,
         input_seed: int,
-        facefix: bool,
-        facefix_strength: float,
         prompt_matrix: bool,
         loopback: bool,
         upscale: bool,
         inpainting_mask_blur,
         inpainting_mask_content,
         inpainting_image,
-        use_input_seed: bool
-):
+        use_input_seed: bool):
 
     if mode == 'Text-to-Image' or mode == 'Image-to-Image':
         if batch_count <= 0:
@@ -1967,12 +1863,12 @@ def do_generate(
             raise Exception("Image dimensions must both be multiples of 64")
 
     if mode == 'Text-to-Image':
-        images, html = txt2img(
+        images, js, html = txt2img(
             prompt=prompt,
+            negative_prompt=None,
             steps=sampler_steps,
             sampler_index=sampler_index,
-            use_GFPGAN=facefix,
-            strength_GFPGAN=facefix_strength,
+            use_GFPGAN=False,
             prompt_matrix=prompt_matrix,
             n_iter=batch_count,
             batch_size=batch_size,
@@ -1980,8 +1876,7 @@ def do_generate(
             seed=input_seed if use_input_seed else -1,
             height=image_height,
             width=image_width,
-            code=custom_code,
-        )
+            code=custom_code)
 
         if opts.enable_history:
             save_to_history(images, html)
@@ -1999,7 +1894,7 @@ def do_generate(
         elif mode == 'Inpainting':
             img2img_mode = Img2Img_Modes.INPAINT
 
-        images, html = img2img(
+        images, js, html = img2img(
             prompt=prompt,
             init_img=input_img,
             init_img_with_mask=inpainting_image,
@@ -2007,8 +1902,7 @@ def do_generate(
             sampler_index=sampler_index,
             mask_blur=inpainting_mask_blur,
             inpainting_fill=inpainting_mask_content,
-            use_GFPGAN=facefix,
-            strength_GFPGAN=facefix_strength,
+            use_GFPGAN=False,
             prompt_matrix=prompt_matrix,
             mode=img2img_mode,
             n_iter=batch_count,
@@ -2019,7 +1913,11 @@ def do_generate(
             height=image_height,
             width=image_width,
             resize_mode=resize_mode,
-        )
+            # TODO: make these selectable in the UI (not settings) once we move SD upscale to post-processing
+            upscaler_name=opts.sd_upscale_upscaler_index,
+            upscale_overlap=opts.sd_upscale_overlap,
+            # TODO: add UI element for this
+            inpaint_full_res=False)
     else:
         raise Exception('Invalid mode selected')
 
@@ -2084,8 +1982,6 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
                         sd_denoise = gr.Slider(label='Denoising strength (DNS)', value=0.75, minimum=0.0, maximum=1.0, step=0.01, visible=False)
 
                     with gr.Group():
-                        sd_facefix = gr.Checkbox(label='GFPGAN', value=False, visible=have_gfpgan)
-                        sd_facefix_strength = gr.Slider(minimum=0.0, maximum=1.0, step=0.1, label="Strength", value=1, interactive=have_gfpgan, visible=False)
                         sd_use_input_seed = gr.Checkbox(label='Custom seed')
                         sd_input_seed = gr.Number(show_label=False, value=-1, precision=0, visible=False)
                         sd_matrix = gr.Checkbox(label='Create prompt matrix', value=False)
@@ -2117,6 +2013,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
                 # TODO: add style transfer from https://www.tensorflow.org/tutorials/generative/style_transfer
             
             with gr.Row(elem_id='pp_buttons_row'):
+                pp_stats = gr.HTML(elem_id='pp_stats')
                 pp_submit = gr.Button('Submit', variant='primary', elem_id='pp_submit').style(full_width=False)
 
         # Image Info tab
@@ -2142,7 +2039,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
 
 
     # Tab - Stable Diffusion - Callbacks
-    def mode_change(mode: str, facefix: bool, use_input_seed: bool):
+    def mode_change(mode: str):
         is_img2img = (mode == 'Image-to-Image')
         is_txt2img = (mode == 'Text-to-Image')
         is_inpainting = (mode == 'Inpainting')
@@ -2150,6 +2047,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
         return {
             sd_cfg: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_denoise: gr.update(visible=is_img2img or is_inpainting),
+            # TODO: need to hide PLMS from smaplers if in an img2img mode
             sd_sampling_method: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_sampling_steps: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_batch_count: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
@@ -2158,9 +2056,6 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
             sd_image_height: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_image_width: gr.update(visible=is_img2img or is_txt2img or is_inpainting),
             sd_custom_code: gr.update(visible=is_txt2img and cmd_opts.allow_code),
-            sd_input_seed: gr.update(visible=use_input_seed),
-            sd_facefix: gr.update(visible=True),
-            sd_facefix_strength: gr.update(visible=facefix),
             sd_matrix: gr.update(visible=is_img2img or is_txt2img),
             sd_loopback: gr.update(visible=is_img2img),
             sd_upscale: gr.update(visible=is_img2img),
@@ -2174,8 +2069,6 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
         fn=mode_change,
         inputs=[
             sd_mode,
-            sd_facefix,
-            sd_use_input_seed
         ],
         outputs=[
             sd_cfg,
@@ -2189,9 +2082,6 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
             sd_image_height,
             sd_image_width,
             sd_custom_code,
-            sd_input_seed,
-            sd_facefix,
-            sd_facefix_strength,
             sd_matrix,
             sd_loopback,
             sd_upscale,
@@ -2202,7 +2092,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
     )
 
     do_generate_args = dict(
-        fn=wrap_gradio_call(do_generate),
+        fn=wrap_gradio_gpu_call(do_generate),
         inputs=[
             sd_mode,
             sd_prompt,
@@ -2218,8 +2108,6 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
             sd_image_width,
             sd_custom_code,
             sd_input_seed,
-            sd_facefix,
-            sd_facefix_strength,
             sd_matrix,
             sd_loopback,
             sd_upscale,
@@ -2249,12 +2137,6 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
         outputs=sd_batch_size
     )
 
-    sd_facefix.change(
-        lambda checked: gr.update(visible=checked),
-        inputs=sd_facefix,
-        outputs=sd_facefix_strength
-    )
-
     sd_image_height.submit(
         lambda value : 64 * ((value + 63) // 64),
         inputs=sd_image_height,
@@ -2275,7 +2157,7 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
 
     # Tab - Post-Processing - Callbacks
     pp_submit.click(
-        run_postprocessing,
+        wrap_gradio_gpu_call(run_postprocessing),
         inputs=[
             pp_input_image,
             pp_gfpgan_enable,
@@ -2284,7 +2166,10 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
             pp_esrgan_model,
             pp_esrgan_scale
         ],
-        outputs=pp_output_image
+        outputs=[
+            pp_output_image,
+            pp_stats
+        ]
     )
 
     pp_esrgan_enable.change(
@@ -2328,3 +2213,25 @@ with gr.Blocks(css=webui_css + userstyle_css, analytics_enabled=False, title='St
 
 # Start the WebUI
 demo.launch(share=cmd_opts.share)
+
+'''
+# TODO: use this eventually
+interrupt.click(
+    fn=lambda: state.interrupt(),
+    inputs=[],
+    outputs=[],
+)
+
+save.click(
+    fn=wrap_gradio_call(save_files),
+    inputs=[
+        generation_info,
+        gallery,
+    ],
+    outputs=[
+        html_info,
+        html_info,
+        html_info,
+    ]
+)
+'''
