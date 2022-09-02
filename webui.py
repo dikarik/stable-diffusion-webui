@@ -1316,7 +1316,7 @@ def save_files(images, json_params):
     if not images:
         return
 
-    timestamp = datetime.now().strftime("%d-%m-%Y %I_%M_%S")
+    timestamp = datetime.now().strftime("%d-%m-%Y %I_%M_%S %f")
     outdir = os.path.join(opts.outdir_save, timestamp)
     Path(outdir).mkdir(parents=True, exist_ok=True)
 
