@@ -1,7 +1,7 @@
 # Stable Diffusion web UI
-A browser interface based on Gradio library for Stable Diffusion.
+Интерфейс браузера на основе библиотеки Gradio для Stable Diffusion.
 
-Original script with Gradio UI was written by a kind anonymous user. This is a modification.
+Оригинальный скрипт с Gradio UI был написан добрым анонимным пользователем. Это модификация.
 
 ![](screenshot.png)
 ## Installing and running
